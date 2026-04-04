@@ -1,0 +1,133 @@
+.page {
+  height: 100%;
+  background: #f8f8fa;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  padding: 20px 32px 0;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  border-bottom: 1px solid #e4e4e8;
+  padding-bottom: 16px;
+}
+
+.back {
+  font-size: 0.85rem;
+  color: #4a7fd4;
+}
+
+.title {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+.content {
+  padding: 28px 32px;
+  max-width: 540px;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+  overflow-y: auto;
+}
+
+.section {}
+
+.sectionTitle {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #888;
+  margin: 0 0 14px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.label {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #333;
+}
+
+.input {
+  font-size: 0.875rem !important;
+  padding: 8px 12px !important;
+  border-radius: 8px !important;
+  width: 100%;
+}
+
+.select {
+  font-size: 0.875rem !important;
+  padding: 8px 10px !important;
+  border-radius: 8px !important;
+  width: 100%;
+  background: #fff;
+  border: 1px solid #ccc;
+}
+
+.range {
+  width: 100%;
+  accent-color: #4a7fd4;
+  border: none !important;
+  padding: 0 !important;
+  cursor: pointer;
+}
+
+.checkboxField {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.checkboxField input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: #4a7fd4;
+  border: none !important;
+  padding: 0 !important;
+  flex-shrink: 0;
+}
+
+.homeRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.homeCoords {
+  font-size: 0.8rem;
+  color: #555;
+  font-variant-numeric: tabular-nums;
+  flex: 1;
+}
+
+.setHomeBtn {
+  font-size: 0.78rem;
+  padding: 5px 10px;
+  white-space: nowrap;
+}
+
+.hint {
+  font-size: 0.75rem;
+  color: #888;
+}
+
+@media (prefers-color-scheme: dark) {
+  .page { background: #18181c; }
+  .header { border-color: #2e2e38; }
+  .title { color: #f0f0f0; }
+  .label { color: #ccc; }
+  .input, .select { background: #1e1e24 !important; color: #f0f0f0 !important; border-color: #3a3a48 !important; }
+  .sectionTitle { color: #666; }
+  .homeCoords { color: #aaa; }
+}

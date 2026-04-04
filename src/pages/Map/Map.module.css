@@ -1,0 +1,221 @@
+/* ── Page shell ─────────────────────────────────────────────── */
+.container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.map {
+  width: 100%;
+  height: 100%;
+}
+
+/* ── Top nav ────────────────────────────────────────────────── */
+.topNav {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(10px);
+  border-radius: 8px;
+  padding: 5px 14px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.14);
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 0.9rem;
+  letter-spacing: -0.02em;
+  color: #1a1a1a;
+}
+
+.settingsLink {
+  font-size: 1rem;
+  color: #666;
+  line-height: 1;
+}
+
+.settingsLink:hover { color: #4a7fd4; }
+
+/* ── Bottom panel ───────────────────────────────────────────── */
+.bottomPanel {
+  position: absolute;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(10px);
+  border-radius: 10px;
+  padding: 10px 16px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.18);
+  white-space: nowrap;
+}
+
+.divider {
+  width: 1px;
+  height: 22px;
+  background: #ddd;
+  flex-shrink: 0;
+}
+
+/* ── Coordinate inputs ──────────────────────────────────────── */
+.coordGroup {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.coordLabel {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #555;
+  width: 14px;
+  text-align: right;
+}
+
+.coordInput {
+  width: 80px;
+  padding: 4px 6px !important;
+  font-size: 0.78rem !important;
+  text-align: right;
+  border-color: #ddd !important;
+  border-radius: 5px !important;
+}
+
+.coordInput:focus { border-color: #4a7fd4 !important; }
+
+/* ── Buttons ────────────────────────────────────────────────── */
+.drawBtn {
+  font-size: 0.8rem;
+  padding: 5px 10px;
+  background: #fff;
+  border-color: #ccc;
+}
+
+.drawBtnActive {
+  background: #e8f0fe !important;
+  border-color: #4a7fd4 !important;
+  color: #4a7fd4;
+}
+
+.fetchBtn {
+  font-size: 0.8rem;
+  padding: 5px 14px;
+  background: #4a7fd4;
+  border-color: #4a7fd4;
+  color: #fff;
+}
+
+.fetchBtn:hover:not(:disabled) {
+  background: #3a6fc4;
+  border-color: #3a6fc4;
+}
+
+.error {
+  font-size: 0.75rem;
+  color: #c0392b;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── 3D preview overlay ─────────────────────────────────────── */
+.previewOverlay {
+  position: absolute;
+  top: 60px;
+  right: 20px;
+  bottom: 80px;
+  width: 400px;
+  z-index: 1000;
+  background: rgba(14, 14, 18, 0.93);
+  backdrop-filter: blur(10px);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 8px 36px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+}
+
+.previewHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  background: rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.previewTitle {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #e8e8e8;
+}
+
+.previewMeta {
+  font-size: 0.7rem;
+  color: #777;
+  flex: 1;
+}
+
+.closeBtn {
+  background: none !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: #666;
+  padding: 2px 4px;
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+.closeBtn:hover { color: #ddd !important; }
+
+.previewCanvas {
+  flex: 1;
+}
+
+.exportRow {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.exportBtn {
+  flex: 1;
+  font-size: 0.75rem;
+  padding: 6px;
+  background: rgba(255, 255, 255, 0.07) !important;
+  border-color: rgba(255, 255, 255, 0.15) !important;
+  color: #ccc !important;
+}
+
+.exportBtn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14) !important;
+  border-color: rgba(255, 255, 255, 0.25) !important;
+}
+
+/* ── Dark-mode map panel adjustments ───────────────────────── */
+@media (prefers-color-scheme: dark) {
+  .topNav {
+    background: rgba(20, 20, 26, 0.92);
+  }
+  .brand { color: #f0f0f0; }
+  .settingsLink { color: #888; }
+
+  .bottomPanel {
+    background: rgba(20, 20, 26, 0.94);
+  }
+  .divider { background: #3a3a48; }
+  .coordLabel { color: #aaa; }
+  .coordInput { background: #1a1a22 !important; color: #f0f0f0 !important; border-color: #3a3a48 !important; }
+  .drawBtn { background: #1a1a22 !important; border-color: #3a3a48 !important; color: #e0e0e0 !important; }
+}
