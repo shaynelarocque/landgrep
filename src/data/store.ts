@@ -13,6 +13,10 @@ export interface Heightmap {
   height: number
   minElev: number
   maxElev: number
+  /** Elevation all water pixels were flattened to; null when masking was off,
+   *  failed, or found no water in the bbox. */
+  waterLevel: number | null
+  waterMaskError: string | null
 }
 
 export interface MapHome {

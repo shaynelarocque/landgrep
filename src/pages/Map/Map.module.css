@@ -180,6 +180,23 @@
   color: #ddd !important;
 }
 
+.warnBanner {
+  padding: 7px 14px;
+  font-size: 0.72rem;
+  color: #e8b339;
+  background: rgba(232, 179, 57, 0.08);
+  border-bottom: 1px solid rgba(232, 179, 57, 0.25);
+}
+
+.warnDetail {
+  margin-top: 3px;
+  color: rgba(232, 179, 57, 0.65);
+  font-size: 0.68rem;
+  max-height: 3.6em;
+  overflow: hidden;
+  word-break: break-word;
+}
+
 .previewCanvas {
   flex: 1;
 }

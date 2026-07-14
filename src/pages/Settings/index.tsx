@@ -124,7 +124,7 @@ export default function Settings() {
               checked={waterMask}
               onChange={e => setWaterMask(e.target.checked)}
             />
-            <span className={styles.label}>Zero waterways (OSM water mask)</span>
+            <span className={styles.label}>Flatten waterways (OSM water mask)</span>
           </label>
 
           <label className={styles.field} style={{ marginTop: 16 }}>

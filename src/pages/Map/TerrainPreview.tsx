@@ -6,12 +6,13 @@ import { invoke } from "@tauri-apps/api/core"
 import { useStore, type Heightmap, type Bounds } from "../../data/store"
 import styles from "./Map.module.css"
 
-// --- colour ramp: elevation t ∈ [0,1] → RGB ---
+const WATER_COLOR: [number, number, number] = [0.29, 0.50, 0.71] // #4a80b5
+
+// --- land colour ramp: normalized t ∈ [0,1] → RGB ---
 function elevColor(t: number): [number, number, number] {
-  // water → lowland → highland → snow
+  // lowland → highland → snow
   const stops: Array<[number, [number, number, number]]> = [
-    [0.0, [0.29, 0.50, 0.71]],  // #4a80b5 water
-    [0.05, [0.35, 0.55, 0.30]], // #598a4d low green
+    [0.0, [0.35, 0.55, 0.30]],  // #598a4d low green
     [0.35, [0.60, 0.52, 0.33]], // #998552 tawny
     [0.70, [0.70, 0.65, 0.55]], // #b3a68c pale rock
     [1.0, [0.95, 0.95, 0.95]],  // #f2f2f2 snow
@@ -32,8 +33,7 @@ function TerrainMesh({ heightmap, bounds, verticalScale }: {
   bounds: Bounds
   verticalScale: number
 }) {
-  const { data, width, height, minElev, maxElev } = heightmap
-  const elevRange = Math.max(maxElev - minElev, 1)
+  const { data, width, height, minElev, maxElev, waterLevel } = heightmap
 
   // Aspect ratio from physical dimensions (metres)
   const latCenter = (bounds.north + bounds.south) / 2
@@ -68,8 +68,12 @@ function TerrainMesh({ heightmap, bounds, verticalScale }: {
         // Same scale as STL: metres × (units/metre) × verticalScale
         pos[vIdx + 2] = clamped * unitsPerMetre * verticalScale
 
-        const t = elevRange > 0 ? clamped / elevRange : 0
-        const [r, gv, b] = elevColor(t)
+        // Water is an exact flattened level from the backend; everything else
+        // ramps over the land range so low-relief terrain still shows contrast.
+        const isWater = waterLevel != null && elev <= waterLevel + 1e-3
+        const landRange = Math.max(maxElev - minElev, 1)
+        const t = Math.min(Math.max((elev - minElev) / landRange, 0), 1)
+        const [r, gv, b] = isWater ? WATER_COLOR : elevColor(t)
         colors[vIdx] = r
         colors[vIdx + 1] = gv
         colors[vIdx + 2] = b
@@ -107,6 +111,15 @@ export default function TerrainPreview() {
     }
   }
 
+  async function handleExportMask() {
+    try {
+      const path = await invoke<string>("export_mask")
+      alert(`Saved to ${path}`)
+    } catch (e) {
+      alert(`Export failed: ${e}`)
+    }
+  }
+
   const { minElev, maxElev } = heightmap
   const meta = `${heightmap.width}×${heightmap.height}  ·  ${minElev.toFixed(0)}–${maxElev.toFixed(0)} m`
 
@@ -117,6 +130,13 @@ export default function TerrainPreview() {
         <span className={styles.previewMeta}>{meta}</span>
         <button className={styles.closeBtn} onClick={() => setHeightmap(null)}>✕</button>
       </div>
+
+      {heightmap.waterMaskError && (
+        <div className={styles.warnBanner} title={heightmap.waterMaskError}>
+          ⚠ Water mask failed — terrain shown without flattening. Re-fetch to retry.
+          <div className={styles.warnDetail}>{heightmap.waterMaskError}</div>
+        </div>
+      )}
 
       <Canvas
         className={styles.previewCanvas}
@@ -132,6 +152,14 @@ export default function TerrainPreview() {
       <div className={styles.exportRow}>
         <button className={styles.exportBtn} onClick={handleExportStl}>
           Export STL
+        </button>
+        <button
+          className={styles.exportBtn}
+          onClick={handleExportMask}
+          disabled={heightmap.waterLevel == null}
+          title={heightmap.waterLevel == null ? "No water mask for this fetch" : "Save the water mask as a PNG"}
+        >
+          Export Mask
         </button>
         <button className={styles.exportBtn} disabled title="Coming soon">
           Export NC
