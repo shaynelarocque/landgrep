@@ -398,16 +398,21 @@ fn mask_from_overpass(
 mod tests {
   use super::*;
 
-  /// Full-response fixture check: set LANDGREP_OVERPASS_FIXTURE to a saved
-  /// Overpass JSON response to validate mask geometry against it.
+  /// Real Overpass response for the Montreal region (bbox 45.30,-74.25 →
+  /// 45.75,-73.30, fetched 2026-07-13): 1697 ways + 107 relations including
+  /// multipolygons with inner rings (islands).
+  fn montreal_fixture() -> serde_json::Value {
+    use std::io::Read;
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/overpass_montreal.json.gz");
+    let file = std::fs::File::open(path).unwrap();
+    let mut json = String::new();
+    flate2::read::GzDecoder::new(file).read_to_string(&mut json).unwrap();
+    serde_json::from_str(&json).unwrap()
+  }
+
   #[test]
   fn mask_matches_fixture() {
-    let Ok(path) = std::env::var("LANDGREP_OVERPASS_FIXTURE") else {
-      return;
-    };
-    let body: serde_json::Value = serde_json
-      ::from_str(&std::fs::read_to_string(path).unwrap())
-      .unwrap();
+    let body = montreal_fixture();
     let mask = mask_from_overpass(&body, 45.30, 45.75, -74.25, -73.3, 760, 500).unwrap();
     let water = mask
       .iter()
@@ -416,6 +421,109 @@ mod tests {
     // Reference count from an independent Python implementation of the same
     // even-odd fill over the identical fixture.
     assert_eq!(water, 54984);
+
+    // The Island of Montreal must be isolated: mid-island is land while the
+    // St. Lawrence (S/E), Rivière des Prairies (N) and Lac Saint-Louis (SW)
+    // are all water.
+    let px = |lat: f64, lon: f64| {
+      let col = ((lon - -74.25) / (-73.3 - -74.25)) * 759.0;
+      let row = ((45.75 - lat) / (45.75 - 45.30)) * 499.0;
+      mask[(row as usize) * 760 + (col as usize)]
+    };
+    assert!(!px(45.50, -73.62), "mid-island should be land");
+    assert!(px(45.47, -73.52), "St. Lawrence should be water");
+    assert!(px(45.55, -73.68), "Rivière des Prairies should be water");
+    assert!(px(45.40, -73.80), "Lac Saint-Louis should be water");
+  }
+
+  #[test]
+  fn truncated_response_is_rejected() {
+    let body =
+      serde_json::json!({
+      "remark": "runtime error: Query timed out in \"query\" at line 1",
+      "elements": []
+    });
+    assert!(mask_from_overpass(&body, 0.0, 1.0, 0.0, 1.0, 10, 10).is_err());
+  }
+
+  #[test]
+  fn assemble_rings_chains_and_flips_segments() {
+    // A square split into three segments, middle one reversed, given out of
+    // chaining order.
+    let segments = vec![
+      vec![[0.0, 0.0], [0.0, 1.0]],
+      vec![[1.0, 1.0], [1.0, 0.0], [0.0, 0.0]], // closing segment ahead of its turn
+      vec![[1.0, 1.0], [0.0, 1.0]] // needs flipping to chain onto the tail
+    ];
+    let rings = assemble_rings(segments);
+    assert_eq!(rings.len(), 1);
+    let ring = &rings[0];
+    assert_eq!(ring.first(), ring.last(), "ring should close");
+    assert_eq!(ring.len(), 5);
+  }
+
+  #[test]
+  fn assemble_rings_separates_disjoint_rings() {
+    let segments = vec![
+      vec![[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [0.0, 0.0]],
+      vec![[5.0, 5.0], [5.0, 6.0], [6.0, 6.0], [5.0, 5.0]]
+    ];
+    assert_eq!(assemble_rings(segments).len(), 2);
+  }
+
+  #[test]
+  fn flatten_water_sits_below_land_minimum() {
+    // Reservoir scenario: land 197–289 m, water surface ~232 m. Flattening
+    // must land just below 197, never at 0.
+    let mut data = vec![197.0, 289.0, 232.0, 231.5];
+    let mask = vec![false, false, true, true];
+    let level = flatten_water(&mut data, &mask).unwrap();
+    let expected_gap = ((289.0f32 - 197.0) * 0.02).max(1.0);
+    assert_eq!(level, 197.0 - expected_gap);
+    assert_eq!(data, vec![197.0, 289.0, level, level]);
+  }
+
+  #[test]
+  fn flatten_water_degenerate_masks_are_noops() {
+    let mut data = vec![5.0, 10.0];
+    assert_eq!(flatten_water(&mut data, &[false, false]), None);
+    assert_eq!(flatten_water(&mut data, &[true, true]), None);
+    assert_eq!(data, vec![5.0, 10.0]);
+  }
+
+  #[test]
+  fn stl_has_expected_shape_and_finite_normals() {
+    let data = vec![10.0, 12.0, 11.0, 10.5, 13.0, 12.5, 10.0, 11.0, 14.0];
+    let (w, h) = (3usize, 3usize);
+    let stl = build_stl(&data, w, h, 1.5, 45.0, 45.1, -73.1, -73.0);
+
+    let n_tris = (w - 1) * (h - 1) * 2;
+    assert_eq!(stl.len(), 84 + n_tris * 50);
+    let count = u32::from_le_bytes(stl[80..84].try_into().unwrap());
+    assert_eq!(count as usize, n_tris);
+
+    for t in 0..n_tris {
+      let base = 84 + t * 50;
+      for f in 0..12 {
+        let off = base + f * 4;
+        let v = f32::from_le_bytes(stl[off..off + 4].try_into().unwrap());
+        assert!(v.is_finite(), "non-finite float in triangle {t}");
+      }
+    }
+  }
+
+  #[test]
+  fn downsample_caps_dimensions_and_preserves_values() {
+    let src: Vec<f32> = (0..100 * 60).map(|i| i as f32).collect();
+    let (out, w, h) = downsample(&src, 100, 60, 32);
+    assert!(w <= 32 && h <= 32);
+    assert_eq!(out.len(), w * h);
+    // Nearest sampling: every output value must exist in the source.
+    assert!(out.iter().all(|v| src.contains(v)));
+    // No-op below the cap
+    let (same, sw, sh) = downsample(&src, 100, 60, 128);
+    assert_eq!((sw, sh), (100, 60));
+    assert_eq!(same, src);
   }
 
   /// Live network check: set LANDGREP_LIVE_OVERPASS=1 to exercise the real
