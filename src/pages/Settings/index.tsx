@@ -15,12 +15,14 @@ export default function Settings() {
     verticalScale,
     demType,
     exportRes,
+    baseMm,
     waterMask,
     mapHome,
     setApiKey,
     setVerticalScale,
     setDemType,
     setExportRes,
+    setBaseMm,
     setWaterMask,
     setMapHome,
   } = useStore()
@@ -142,6 +144,26 @@ export default function Settings() {
             </select>
             <span className={styles.hint}>
               Resolution of the STL mesh. The 3D preview always uses 256 × 256 regardless.
+            </span>
+          </label>
+
+          <label className={styles.field} style={{ marginTop: 16 }}>
+            <span className={styles.label}>
+              Base thickness &nbsp;
+              <strong>{baseMm.toFixed(1)} mm</strong>
+            </span>
+            <input
+              type='range'
+              className={styles.range}
+              min={0.5}
+              max={10}
+              step={0.5}
+              value={baseMm}
+              onChange={e => setBaseMm(parseFloat(e.target.value))}
+            />
+            <span className={styles.hint}>
+              Solid slab under the lowest terrain. Exports are watertight: top surface, side
+              walls, and a flat bottom.
             </span>
           </label>
         </section>

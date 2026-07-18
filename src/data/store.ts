@@ -17,6 +17,13 @@ export interface Heightmap {
    *  failed, or found no water in the bbox. */
   waterLevel: number | null
   waterMaskError: string | null
+  /** Number of connected land components; null when no mask was built. */
+  landmassCount: number | null
+}
+
+export interface LandmassInfo {
+  id: number
+  areaKm2: number
 }
 
 export interface MapHome {
@@ -41,18 +48,30 @@ interface State {
   apiKey: string
   bounds: Bounds | null
   heightmap: Heightmap | null
+  /** Bounds snapshot of the last successful fetch (bbox inputs may be edited after). */
+  fetchedBounds: Bounds | null
+  /** Data-URL PNG of the landmass segmentation, draped on the map. */
+  landmassOverlay: string | null
+  /** Shift-click accumulates multiple landmasses into one selection. */
+  selectedLandmasses: LandmassInfo[]
   verticalScale: number
   demType: DemType
   /** Max pixel dimension of the mesh written to the STL file (0 = full res). */
   exportRes: number
+  /** Thickness (mm) of the solid slab under the lowest terrain in exports. */
+  baseMm: number
   waterMask: boolean
   mapHome: MapHome
   setApiKey: (key: string) => void
   setBounds: (bounds: Bounds | null) => void
   setHeightmap: (hm: Heightmap | null) => void
+  setFetchedBounds: (b: Bounds | null) => void
+  setLandmassOverlay: (url: string | null) => void
+  setSelectedLandmasses: (lms: LandmassInfo[]) => void
   setVerticalScale: (scale: number) => void
   setDemType: (t: DemType) => void
   setExportRes: (r: number) => void
+  setBaseMm: (mm: number) => void
   setWaterMask: (v: boolean) => void
   setMapHome: (home: MapHome) => void
 }
@@ -73,9 +92,13 @@ export const useStore = create<State>()(set => ({
   apiKey: load("ot-api-key", ""),
   bounds: null,
   heightmap: null,
+  fetchedBounds: null,
+  landmassOverlay: null,
+  selectedLandmasses: [],
   verticalScale: parseFloat(load("vertical-scale", "1.5")),
   demType: (load("dem-type", "SRTMGL3") as DemType),
   exportRes: parseInt(load("export-res", "512")),
+  baseMm: parseFloat(load("base-mm", "2")),
   waterMask: load("water-mask", "true") === "true",
   mapHome: loadJson("map-home", DEFAULT_HOME),
   setApiKey: key => {
@@ -84,6 +107,9 @@ export const useStore = create<State>()(set => ({
   },
   setBounds: bounds => set({ bounds }),
   setHeightmap: hm => set({ heightmap: hm }),
+  setFetchedBounds: b => set({ fetchedBounds: b }),
+  setLandmassOverlay: url => set({ landmassOverlay: url }),
+  setSelectedLandmasses: lms => set({ selectedLandmasses: lms }),
   setVerticalScale: scale => {
     localStorage.setItem("vertical-scale", String(scale))
     set({ verticalScale: scale })
@@ -95,6 +121,10 @@ export const useStore = create<State>()(set => ({
   setExportRes: r => {
     localStorage.setItem("export-res", String(r))
     set({ exportRes: r })
+  },
+  setBaseMm: mm => {
+    localStorage.setItem("base-mm", String(mm))
+    set({ baseMm: mm })
   },
   setWaterMask: v => {
     localStorage.setItem("water-mask", String(v))

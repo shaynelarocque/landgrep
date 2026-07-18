@@ -11,7 +11,11 @@ interface Props {
 }
 
 export default function BottomPanel({ drawMode, onToggleDraw }: Props) {
-  const { apiKey, bounds, setBounds, setHeightmap, demType, waterMask } = useStore()
+  const {
+    apiKey, bounds, setBounds, setHeightmap, demType, waterMask,
+    heightmap, verticalScale, exportRes, baseMm,
+    selectedLandmasses, setSelectedLandmasses, setLandmassOverlay, setFetchedBounds,
+  } = useStore()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -37,12 +41,42 @@ export default function BottomPanel({ drawMode, onToggleDraw }: Props) {
         waterMask,
       })
       setHeightmap(result)
+      setFetchedBounds(bounds)
+      setSelectedLandmasses([])
+      if (result.landmassCount) {
+        setLandmassOverlay(await invoke<string>("landmass_overlay", {}).catch(() => null))
+      } else {
+        setLandmassOverlay(null)
+      }
     } catch (e) {
       setError(String(e))
     } finally {
       setLoading(false)
     }
   }
+
+  async function handleExportLandmass() {
+    if (selectedLandmasses.length === 0) return
+    try {
+      const path = await invoke<string>("export_stl", {
+        verticalScale,
+        exportRes,
+        baseMm,
+        landmasses: selectedLandmasses.map(lm => lm.id),
+      })
+      alert(`Saved to ${path}`)
+    } catch (e) {
+      alert(`Export failed: ${e}`)
+    }
+  }
+
+  async function clearSelection() {
+    setSelectedLandmasses([])
+    setLandmassOverlay(await invoke<string>("landmass_overlay", {}).catch(() => null))
+  }
+
+  const fmtArea = (km2: number) =>
+    km2 >= 100 ? km2.toFixed(0) : km2 >= 1 ? km2.toFixed(1) : km2.toFixed(2)
 
   function setCoord(field: keyof Bounds, raw: string) {
     const val = parseFloat(raw)
@@ -92,6 +126,34 @@ export default function BottomPanel({ drawMode, onToggleDraw }: Props) {
       </button>
 
       {error && <span className={styles.error}>{error}</span>}
+
+      {selectedLandmasses.length > 0 ? (
+        <>
+          <div className={styles.divider} />
+          <span className={styles.landmassInfo}>
+            {selectedLandmasses.length === 1
+              ? "Landmass"
+              : `${selectedLandmasses.length} landmasses`}
+            {" · "}
+            {fmtArea(selectedLandmasses.reduce((sum, lm) => sum + lm.areaKm2, 0))} km²
+          </span>
+          <button className={styles.fetchBtn} onClick={handleExportLandmass}>
+            Export Landmass
+          </button>
+          <button className={styles.drawBtn} onClick={clearSelection} title="Clear selection">
+            ✕
+          </button>
+        </>
+      ) : (
+        heightmap?.landmassCount ? (
+          <>
+            <div className={styles.divider} />
+            <span className={styles.landmassHint}>
+              {heightmap.landmassCount} landmass{heightmap.landmassCount === 1 ? "" : "es"} — click one on the map, shift-click to add
+            </span>
+          </>
+        ) : null
+      )}
     </div>
   )
 }

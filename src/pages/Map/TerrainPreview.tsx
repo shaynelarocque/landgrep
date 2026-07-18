@@ -64,16 +64,16 @@ function TerrainMesh({ heightmap, bounds, verticalScale }: {
         const dataCol = Math.round((col / segW) * (width - 1))
         const dataRow = Math.round((row / segH) * (height - 1))
         const elev = data[dataRow * width + dataCol] ?? 0
-        const clamped = Math.max(0, elev)
-        // Same scale as STL: metres × (units/metre) × verticalScale
-        pos[vIdx + 2] = clamped * unitsPerMetre * verticalScale
+        // Same scale as STL: relief above the area minimum × (units/metre)
+        // × verticalScale, so the preview matches the exported solid's top.
+        pos[vIdx + 2] = Math.max(0, elev - minElev) * unitsPerMetre * verticalScale
 
         // Water is an exact flattened level from the backend; everything else
         // ramps over the land range so low-relief terrain still shows contrast.
         const isWater = waterLevel != null && elev <= waterLevel + 1e-3
         const landRange = Math.max(maxElev - minElev, 1)
-        const t = Math.min(Math.max((elev - minElev) / landRange, 0), 1)
-        const [r, gv, b] = isWater ? WATER_COLOR : elevColor(t)
+        const tc = Math.min(Math.max((elev - minElev) / landRange, 0), 1)
+        const [r, gv, b] = isWater ? WATER_COLOR : elevColor(tc)
         colors[vIdx] = r
         colors[vIdx + 1] = gv
         colors[vIdx + 2] = b
@@ -96,7 +96,7 @@ function TerrainMesh({ heightmap, bounds, verticalScale }: {
 }
 
 export default function TerrainPreview() {
-  const { heightmap, bounds, verticalScale, exportRes, setHeightmap } = useStore()
+  const { heightmap, bounds, verticalScale, exportRes, baseMm, setHeightmap } = useStore()
   if (!heightmap || !bounds) return null
 
   async function handleExportStl() {
@@ -104,6 +104,7 @@ export default function TerrainPreview() {
       const path = await invoke<string>("export_stl", {
         verticalScale,
         exportRes, // 0 = full resolution
+        baseMm,
       })
       alert(`Saved to ${path}`)
     } catch (e) {

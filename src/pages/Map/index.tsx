@@ -4,6 +4,7 @@ import { Link } from "react-router"
 import "leaflet/dist/leaflet.css"
 import { useStore } from "../../data/store"
 import RectangleDraw from "./RectangleDraw"
+import LandmassLayer from "./LandmassLayer"
 import BottomPanel from "./BottomPanel"
 import TerrainPreview from "./TerrainPreview"
 import styles from "./Map.module.css"
@@ -47,6 +48,7 @@ export default function MapPage() {
         />
         <MapTracker />
         <RectangleDraw drawMode={drawMode} onDrawEnd={() => setDrawMode(false)} />
+        <LandmassLayer drawMode={drawMode} />
       </MapContainer>
 
       <BottomPanel drawMode={drawMode} onToggleDraw={() => setDrawMode(d => !d)} />
