@@ -13,7 +13,8 @@ use crate::selection::{
   vector_footprint,
 };
 use crate::mesh::build_stl;
-use crate::water::{ fetch_water_rings, flatten_water, rasterize_ring_groups };
+use crate::ocean::{ flood_ocean_from_border, ocean_ring_group };
+use crate::water::{ fetch_water_geometry, flatten_water, rasterize_ring_groups };
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Heightmap {
@@ -97,15 +98,40 @@ pub async fn fetch_elevation(
   let mut labels: Option<Vec<u32>> = None;
   let mut n_landmasses = 0u32;
   if water_mask {
-    match fetch_water_rings(south, north, west, east).await {
-      Ok(rings) => {
-        let mask = rasterize_ring_groups(&rings, south, north, west, east, width, height);
+    match fetch_water_geometry(south, north, west, east).await {
+      Ok(geo) => {
+        let mut rings = geo.water_groups;
+        // Open sea only exists in OSM as natural=coastline ways; close them
+        // along the bbox into an ocean ring group so the sea is masked like
+        // any other water. Incomplete coastline data falls back to an
+        // elevation flood-fill from the raster border.
+        let coastline_closed = match ocean_ring_group(&geo.coastlines, south, north, west, east) {
+          Ok(Some(group)) => {
+            rings.push(group);
+            true
+          }
+          Ok(None) => geo.coastlines.is_empty(), // inland bbox: nothing to close
+          Err(_) => false,
+        };
+        let mut mask = rasterize_ring_groups(&rings, south, north, west, east, width, height);
+        let mut rings_cover_all_water = true;
+        if !coastline_closed {
+          let ocean = flood_ocean_from_border(&full_data, width, height);
+          if ocean.iter().any(|&o| o) {
+            for (m, &o) in mask.iter_mut().zip(&ocean) {
+              *m |= o;
+            }
+            // the flood-filled ocean has no vector form — smoothed exports
+            // must fall back to the raster footprint upsample
+            rings_cover_all_water = false;
+          }
+        }
         water_level = flatten_water(&mut full_data, &mask);
         let (l, n) = label_landmasses(&mask, width, height);
         labels = Some(l);
         n_landmasses = n;
         cached_mask = Some(mask);
-        cached_rings = Some(rings);
+        cached_rings = rings_cover_all_water.then_some(rings);
       }
       Err(e) => {
         water_mask_error = Some(e);

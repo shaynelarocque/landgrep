@@ -1,16 +1,27 @@
 use crate::CachedElevation;
 use crate::landmass::label_landmasses;
 
-/// Real Overpass response for the Montreal region (bbox 45.30,-74.25 →
-/// 45.75,-73.30, fetched 2026-07-13): 1697 ways + 107 relations including
-/// multipolygons with inner rings (islands).
-pub(crate) fn montreal_fixture() -> serde_json::Value {
+fn gz_fixture(path: &str) -> serde_json::Value {
   use std::io::Read;
-  let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/overpass_montreal.json.gz");
   let file = std::fs::File::open(path).unwrap();
   let mut json = String::new();
   flate2::read::GzDecoder::new(file).read_to_string(&mut json).unwrap();
   serde_json::from_str(&json).unwrap()
+}
+
+/// Real Overpass response for the Montreal region (bbox 45.30,-74.25 →
+/// 45.75,-73.30, fetched 2026-07-13): 1697 ways + 107 relations including
+/// multipolygons with inner rings (islands).
+pub(crate) fn montreal_fixture() -> serde_json::Value {
+  gz_fixture(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/overpass_montreal.json.gz"))
+}
+
+/// Real Overpass response for western Sicily (bbox 37.0333,12.0355 →
+/// 38.346,13.5626, fetched 2026-07-18): 212 coastline ways + 2833 water
+/// ways + 6 relations. Exercises coastline closing on real data, including
+/// an island fragment (Marettimo) whose chain dangles outside the bbox.
+pub(crate) fn sicily_fixture() -> serde_json::Value {
+  gz_fixture(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/overpass_sicily.json.gz"))
 }
 
 /// 2-manifold check: every directed edge appears exactly once with its

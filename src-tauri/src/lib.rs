@@ -5,6 +5,7 @@ mod geotiff;
 mod grid;
 mod landmass;
 mod mesh;
+mod ocean;
 mod selection;
 #[cfg(test)]
 mod test_support;

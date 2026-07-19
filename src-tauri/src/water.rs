@@ -6,15 +6,24 @@ use crate::grid::rasterize_rings;
 /// overlapping polygons cancel out.
 pub(crate) type RingGroup = Vec<Vec<[f64; 2]>>;
 
-/// Fetch water polygon rings from Overpass, grouped per element.
-/// Retries across mirror endpoints; errors propagate so the caller can
-/// surface them instead of silently rendering unmasked terrain.
-pub(crate) async fn fetch_water_rings(
+/// Water geometry for a bbox: closed polygon ring groups (lakes, rivers) and
+/// raw `natural=coastline` polylines. Coastlines are directional open ways —
+/// land on the left — that need closing along the bbox before they can be
+/// filled; see `ocean::ocean_ring_group`.
+pub(crate) struct WaterGeometry {
+  pub(crate) water_groups: Vec<RingGroup>,
+  pub(crate) coastlines: Vec<Vec<[f64; 2]>>,
+}
+
+/// Fetch water polygon rings and coastline ways from Overpass, grouped per
+/// element. Retries across mirror endpoints; errors propagate so the caller
+/// can surface them instead of silently rendering unmasked terrain.
+pub(crate) async fn fetch_water_geometry(
   south: f64,
   north: f64,
   west: f64,
   east: f64
-) -> Result<Vec<RingGroup>, String> {
+) -> Result<WaterGeometry, String> {
   const ENDPOINTS: [&str; 3] = [
     "https://overpass-api.de/api/interpreter",
     "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
@@ -25,9 +34,9 @@ pub(crate) async fn fetch_water_rings(
   let mut last_err = String::new();
   for attempt in 0..ATTEMPTS {
     let endpoint = ENDPOINTS[attempt % ENDPOINTS.len()];
-    match try_fetch_water_rings(endpoint, south, north, west, east).await {
-      Ok(rings) => {
-        return Ok(rings);
+    match try_fetch_water_geometry(endpoint, south, north, west, east).await {
+      Ok(geometry) => {
+        return Ok(geometry);
       }
       Err(e) => {
         last_err = e;
@@ -108,21 +117,22 @@ fn member_segments(members: &[serde_json::Value], role: &str) -> Vec<Vec<[f64; 2
     .collect()
 }
 
-async fn try_fetch_water_rings(
+async fn try_fetch_water_geometry(
   endpoint: &str,
   south: f64,
   north: f64,
   west: f64,
   east: f64
-) -> Result<Vec<RingGroup>, String> {
-  // `natural=coastline` is intentionally excluded: OSM coastlines are open ways
-  // with special winding semantics, not closeable polygons.
-  // `waterway=riverbank` is the legacy tag; `natural=water` covers modern usage.
+) -> Result<WaterGeometry, String> {
+  // `natural=water` covers modern polygon usage; `waterway=riverbank` is the
+  // legacy tag. `natural=coastline` is the only representation of open sea —
+  // directional open ways, closed along the bbox later.
   let query = format!(
     "[out:json][timeout:60];\
         (\
           way[\"natural\"=\"water\"]({south},{west},{north},{east});\
           way[\"waterway\"=\"riverbank\"]({south},{west},{north},{east});\
+          way[\"natural\"=\"coastline\"]({south},{west},{north},{east});\
           relation[\"natural\"=\"water\"]({south},{west},{north},{east});\
           relation[\"waterway\"=\"riverbank\"]({south},{west},{north},{east});\
         );\
@@ -155,13 +165,14 @@ async fn try_fetch_water_rings(
       format!("HTTP {status}, non-JSON response: {snippet}")
     })?;
 
-  rings_from_overpass(&body)
+  geometry_from_overpass(&body)
 }
 
-/// Extract per-element ring groups from an Overpass response. Keeping the
-/// element grouping (rather than one flat ring list) preserves the fill
-/// semantics: even-odd within an element, union across elements.
-pub(crate) fn rings_from_overpass(body: &serde_json::Value) -> Result<Vec<RingGroup>, String> {
+/// Extract per-element ring groups and coastline polylines from an Overpass
+/// response. Keeping the element grouping (rather than one flat ring list)
+/// preserves the fill semantics: even-odd within an element, union across
+/// elements.
+pub(crate) fn geometry_from_overpass(body: &serde_json::Value) -> Result<WaterGeometry, String> {
   // Overpass reports rate limiting / mid-stream timeouts as a `remark` on an
   // otherwise valid (but truncated) response. Truncation silently drops the
   // large relations — exactly the big rivers and lakes — so treat it as failure.
@@ -169,19 +180,24 @@ pub(crate) fn rings_from_overpass(body: &serde_json::Value) -> Result<Vec<RingGr
     return Err(format!("Overpass remark: {remark}"));
   }
 
-  let mut groups: Vec<RingGroup> = Vec::new();
+  let mut water_groups: Vec<RingGroup> = Vec::new();
+  let mut coastlines: Vec<Vec<[f64; 2]>> = Vec::new();
 
   let elements = body["elements"].as_array().ok_or("no elements")?;
   for el in elements {
     match el["type"].as_str() {
       Some("way") => {
         if let Some(geom) = el["geometry"].as_array() {
-          let ring: Vec<[f64; 2]> = geom
+          let pts: Vec<[f64; 2]> = geom
             .iter()
             .filter_map(|g| Some([g["lat"].as_f64()?, g["lon"].as_f64()?]))
             .collect();
-          if ring.len() >= 3 {
-            groups.push(vec![ring]);
+          if el["tags"]["natural"].as_str() == Some("coastline") {
+            if pts.len() >= 2 {
+              coastlines.push(pts);
+            }
+          } else if pts.len() >= 3 {
+            water_groups.push(vec![pts]);
           }
         }
       }
@@ -194,7 +210,7 @@ pub(crate) fn rings_from_overpass(body: &serde_json::Value) -> Result<Vec<RingGr
           let mut rings = assemble_rings(member_segments(members, "outer"));
           rings.extend(assemble_rings(member_segments(members, "inner")));
           if !rings.is_empty() {
-            groups.push(rings);
+            water_groups.push(rings);
           }
         }
       }
@@ -202,7 +218,7 @@ pub(crate) fn rings_from_overpass(body: &serde_json::Value) -> Result<Vec<RingGr
     }
   }
 
-  Ok(groups)
+  Ok(WaterGeometry { water_groups, coastlines })
 }
 
 /// Rasterize ring groups onto a grid: even-odd fill per group, union across
@@ -224,9 +240,10 @@ pub(crate) fn rasterize_ring_groups(
   mask
 }
 
-/// Rings + rasterization in one step. Production code keeps the two stages
-/// separate (rings are cached for export-resolution re-rasterization);
-/// fixture tests pin this composition's output.
+/// Water-polygon rings + rasterization in one step (no coastline closing).
+/// Production code keeps the stages separate (rings are cached for
+/// export-resolution re-rasterization); fixture tests pin this composition's
+/// output.
 #[cfg(test)]
 pub(crate) fn mask_from_overpass(
   body: &serde_json::Value,
@@ -237,7 +254,8 @@ pub(crate) fn mask_from_overpass(
   width: usize,
   height: usize
 ) -> Result<Vec<bool>, String> {
-  Ok(rasterize_ring_groups(&rings_from_overpass(body)?, south, north, west, east, width, height))
+  let geo = geometry_from_overpass(body)?;
+  Ok(rasterize_ring_groups(&geo.water_groups, south, north, west, east, width, height))
 }
 
 /// Flatten masked pixels to just below the lowest LAND elevation, not to 0 —
@@ -365,13 +383,34 @@ mod tests {
       return;
     }
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let rings = rt.block_on(fetch_water_rings(45.38, 45.42, -73.85, -73.8)).unwrap();
-    let mask = rasterize_ring_groups(&rings, 45.38, 45.42, -73.85, -73.8, 100, 100);
+    let geo = rt.block_on(fetch_water_geometry(45.38, 45.42, -73.85, -73.8)).unwrap();
+    let mask = rasterize_ring_groups(&geo.water_groups, 45.38, 45.42, -73.85, -73.8, 100, 100);
     let water = mask
       .iter()
       .filter(|&&w| w)
       .count();
     assert!(water > 1000, "expected mostly water over Lac Saint-Louis, got {water} px");
+  }
+
+  #[test]
+  fn coastline_ways_are_split_from_water_polygons() {
+    let body =
+      serde_json::json!({
+      "elements": [
+        {"type": "way", "tags": {"natural": "coastline"}, "geometry": [
+          {"lat": 0.0, "lon": 0.5}, {"lat": 1.0, "lon": 0.5}
+        ]},
+        {"type": "way", "tags": {"natural": "water"}, "geometry": [
+          {"lat": 0.1, "lon": 0.1}, {"lat": 0.1, "lon": 0.2},
+          {"lat": 0.2, "lon": 0.2}, {"lat": 0.2, "lon": 0.1}
+        ]}
+      ]
+    });
+    let geo = geometry_from_overpass(&body).unwrap();
+    assert_eq!(geo.coastlines.len(), 1);
+    assert_eq!(geo.water_groups.len(), 1);
+    // the coastline must NOT be treated as a fillable water ring
+    assert_eq!(geo.coastlines[0].len(), 2);
   }
 
   #[test]
