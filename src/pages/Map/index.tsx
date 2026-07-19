@@ -28,7 +28,9 @@ function MapTracker() {
 
 export default function MapPage() {
   const [tool, setTool] = useState<DrawTool>(null)
-  const { mapHome } = useStore()
+  // Initial position only — MapContainer treats center/zoom as init-only, and
+  // subscribing here would re-render (and previously remount) the map on every moveend.
+  const [mapHome] = useState(() => useStore.getState().mapHome)
 
   return (
     <div className={styles.container}>
@@ -40,7 +42,6 @@ export default function MapPage() {
       </div>
 
       <MapContainer
-        key={`${mapHome.lat},${mapHome.lng},${mapHome.zoom}`}
         center={[mapHome.lat, mapHome.lng]}
         zoom={mapHome.zoom}
         className={styles.map}
