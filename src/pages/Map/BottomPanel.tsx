@@ -1,20 +1,22 @@
 import { useState } from "react"
 import { invoke } from "@tauri-apps/api/core"
 import { useStore, type Heightmap, type Bounds } from "../../data/store"
+import type { DrawTool } from "./index"
 
 const PREVIEW_RES = 256 // pixels sent to the 3D preview over IPC
 import styles from "./Map.module.css"
 
 interface Props {
-  drawMode: boolean
-  onToggleDraw: () => void
+  tool: DrawTool
+  setTool: (t: DrawTool) => void
 }
 
-export default function BottomPanel({ drawMode, onToggleDraw }: Props) {
+export default function BottomPanel({ tool, setTool }: Props) {
   const {
     apiKey, bounds, setBounds, setHeightmap, demType, waterMask,
-    heightmap, verticalScale, exportRes, baseMm,
+    heightmap, verticalScale, exportRes, baseMm, smoothFactor,
     selectedLandmasses, setSelectedLandmasses, setLandmassOverlay, setFetchedBounds,
+    lassoSelection, setLassoSelection,
   } = useStore()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -43,6 +45,7 @@ export default function BottomPanel({ drawMode, onToggleDraw }: Props) {
       setHeightmap(result)
       setFetchedBounds(bounds)
       setSelectedLandmasses([])
+      setLassoSelection(null)
       if (result.landmassCount) {
         setLandmassOverlay(await invoke<string>("landmass_overlay", {}).catch(() => null))
       } else {
@@ -55,14 +58,14 @@ export default function BottomPanel({ drawMode, onToggleDraw }: Props) {
     }
   }
 
-  async function handleExportLandmass() {
-    if (selectedLandmasses.length === 0) return
+  async function handleExport(selection: { landmasses?: number[]; lasso?: boolean }) {
     try {
       const path = await invoke<string>("export_stl", {
         verticalScale,
         exportRes,
         baseMm,
-        landmasses: selectedLandmasses.map(lm => lm.id),
+        smoothFactor,
+        ...selection,
       })
       alert(`Saved to ${path}`)
     } catch (e) {
@@ -72,6 +75,7 @@ export default function BottomPanel({ drawMode, onToggleDraw }: Props) {
 
   async function clearSelection() {
     setSelectedLandmasses([])
+    setLassoSelection(null)
     setLandmassOverlay(await invoke<string>("landmass_overlay", {}).catch(() => null))
   }
 
@@ -101,11 +105,11 @@ export default function BottomPanel({ drawMode, onToggleDraw }: Props) {
   return (
     <div className={styles.bottomPanel}>
       <button
-        className={`${styles.drawBtn} ${drawMode ? styles.drawBtnActive : ""}`}
-        onClick={onToggleDraw}
+        className={`${styles.drawBtn} ${tool === "rect" ? styles.drawBtnActive : ""}`}
+        onClick={() => setTool(tool === "rect" ? null : "rect")}
         title="Draw a rectangle on the map"
       >
-        {drawMode ? "✕ Cancel" : "✏ Draw"}
+        {tool === "rect" ? "✕ Cancel" : "✏ Draw"}
       </button>
 
       <div className={styles.divider} />
@@ -127,7 +131,33 @@ export default function BottomPanel({ drawMode, onToggleDraw }: Props) {
 
       {error && <span className={styles.error}>{error}</span>}
 
-      {selectedLandmasses.length > 0 ? (
+      {heightmap && (
+        <>
+          <div className={styles.divider} />
+          <button
+            className={`${styles.drawBtn} ${tool === "lasso" ? styles.drawBtnActive : ""}`}
+            onClick={() => setTool(tool === "lasso" ? null : "lasso")}
+            title="Freehand-select terrain to export — the drawn outline is clipped to land, so it only needs to be rough"
+          >
+            {tool === "lasso" ? "✕ Cancel" : "◌ Lasso"}
+          </button>
+        </>
+      )}
+
+      {lassoSelection ? (
+        <>
+          <div className={styles.divider} />
+          <span className={styles.landmassInfo}>
+            Lasso · {fmtArea(lassoSelection.areaKm2)} km²
+          </span>
+          <button className={styles.fetchBtn} onClick={() => handleExport({ lasso: true })}>
+            Export Selection
+          </button>
+          <button className={styles.drawBtn} onClick={clearSelection} title="Clear selection">
+            ✕
+          </button>
+        </>
+      ) : selectedLandmasses.length > 0 ? (
         <>
           <div className={styles.divider} />
           <span className={styles.landmassInfo}>
@@ -137,7 +167,10 @@ export default function BottomPanel({ drawMode, onToggleDraw }: Props) {
             {" · "}
             {fmtArea(selectedLandmasses.reduce((sum, lm) => sum + lm.areaKm2, 0))} km²
           </span>
-          <button className={styles.fetchBtn} onClick={handleExportLandmass}>
+          <button
+            className={styles.fetchBtn}
+            onClick={() => handleExport({ landmasses: selectedLandmasses.map(lm => lm.id) })}
+          >
             Export Landmass
           </button>
           <button className={styles.drawBtn} onClick={clearSelection} title="Clear selection">

@@ -16,10 +16,11 @@ struct CachedElevation {
   west: f64,
   east: f64,
   water_mask: Option<Vec<bool>>,
-  water_level: Option<f32>,
   /// Connected-component id per pixel: 0 = water, 1..=n = landmass.
   labels: Option<Vec<u32>>,
   n_landmasses: u32,
+  /// Freehand lasso selection (drawn polygon ∩ land) at full resolution.
+  lasso: Option<Vec<bool>>,
 }
 
 pub struct ElevationState(Mutex<Option<CachedElevation>>);
@@ -60,6 +61,87 @@ fn downsample<T: Copy>(src: &[T], sw: usize, sh: usize, max_dim: usize) -> (Vec<
     }
   }
   (out, dw, dh)
+}
+
+/// Bilinearly upsample a vertex-centered grid by an integer factor. Output is
+/// (w-1)*factor+1 wide so source vertices land exactly on output vertices —
+/// the geographic bbox is unchanged.
+fn upsample_bilinear(src: &[f32], w: usize, h: usize, factor: usize) -> (Vec<f32>, usize, usize) {
+  let (dw, dh) = ((w - 1) * factor + 1, (h - 1) * factor + 1);
+  let mut out = Vec::with_capacity(dw * dh);
+  for r in 0..dh {
+    let y = (r as f32) / (factor as f32);
+    let r0 = (y as usize).min(h - 1);
+    let r1 = (r0 + 1).min(h - 1);
+    let fy = y - (r0 as f32);
+    for c in 0..dw {
+      let x = (c as f32) / (factor as f32);
+      let c0 = (x as usize).min(w - 1);
+      let c1 = (c0 + 1).min(w - 1);
+      let fx = x - (c0 as f32);
+      let top = src[r0 * w + c0] * (1.0 - fx) + src[r0 * w + c1] * fx;
+      let bot = src[r1 * w + c0] * (1.0 - fx) + src[r1 * w + c1] * fx;
+      out.push(top * (1.0 - fy) + bot * fy);
+    }
+  }
+  (out, dw, dh)
+}
+
+/// Separable box blur with clamped, renormalized windows at the borders, so
+/// a constant field stays exactly constant (no edge erosion).
+fn box_blur(data: &mut [f32], w: usize, h: usize, radius: usize) {
+  if radius == 0 {
+    return;
+  }
+  let mut tmp = vec![0.0f32; w * h];
+  for r in 0..h {
+    for c in 0..w {
+      let c0 = c.saturating_sub(radius);
+      let c1 = (c + radius).min(w - 1);
+      let sum: f32 = data[r * w + c0..=r * w + c1].iter().sum();
+      tmp[r * w + c] = sum / ((c1 - c0 + 1) as f32);
+    }
+  }
+  for c in 0..w {
+    for r in 0..h {
+      let r0 = r.saturating_sub(radius);
+      let r1 = (r + radius).min(h - 1);
+      let mut sum = 0.0f32;
+      for rr in r0..=r1 {
+        sum += tmp[rr * w + c];
+      }
+      data[r * w + c] = sum / ((r1 - r0 + 1) as f32);
+    }
+  }
+}
+
+/// Edge-smoothing supersample for exports: bilinear elevation upsample plus a
+/// smoothed footprint upsample (0/1 indicator → bilinear → box blur → 0.5
+/// threshold). Staircase footprint borders come out chamfered and rounded
+/// instead of tracing pixel edges. Synthesizes no new terrain detail — it
+/// only interpolates — and multiplies mesh dimensions by `factor`.
+fn smooth_upsample(
+  data: &[f32],
+  footprint: &[bool],
+  w: usize,
+  h: usize,
+  factor: usize
+) -> Result<(Vec<f32>, Vec<bool>, usize, usize), String> {
+  let (up_data, dw, dh) = upsample_bilinear(data, w, h, factor);
+  let fp_field: Vec<f32> = footprint
+    .iter()
+    .map(|&b| if b { 1.0 } else { 0.0 })
+    .collect();
+  let (mut fp_up, _, _) = upsample_bilinear(&fp_field, w, h, factor);
+  box_blur(&mut fp_up, dw, dh, factor / 2);
+  let fp: Vec<bool> = fp_up
+    .iter()
+    .map(|&v| v >= 0.5)
+    .collect();
+  if !fp.iter().any(|&b| b) {
+    return Err("Selection too small to smooth — reduce edge smoothing".into());
+  }
+  Ok((up_data, fp, dw, dh))
 }
 
 fn parse_geotiff(bytes: Vec<u8>) -> Result<(Vec<f32>, usize, usize), String> {
@@ -621,9 +703,9 @@ mod tests {
       west: -74.0,
       east: -73.0,
       water_mask: Some(water),
-      water_level: Some(-1.0),
       labels: Some(labels.clone()),
       n_landmasses: n,
+      lasso: None,
     };
     (cache, labels)
   }
@@ -681,6 +763,112 @@ mod tests {
   }
 
   #[test]
+  fn lasso_clips_to_land_and_meshes() {
+    let (cache, _) = two_block_cache();
+    // Top-left quadrant of the 45–46 / -74–-73 bbox: covers land block A
+    // (rows/cols 1–2) plus surrounding water, which must be dropped.
+    let ring = vec![[46.0, -74.0], [46.0, -73.5], [45.5, -73.5], [45.5, -74.0]];
+    let keep = lasso_footprint(&cache, ring).unwrap();
+    assert_eq!(
+      keep
+        .iter()
+        .filter(|&&k| k)
+        .count(),
+      4
+    );
+    let (crop, footprint, cw, ch, s, n_, wst, e) = crop_to_footprint(&cache, &keep).unwrap();
+    let stl = build_stl(&crop, &footprint, cw, ch, 1.0, 1.0, s, n_, wst, e).unwrap();
+    assert_watertight(&stl);
+  }
+
+  #[test]
+  fn lasso_splits_a_single_landmass() {
+    // One connected 2×6 land strip; the lasso takes only its left half —
+    // the manual-split case connected-component labeling can't express.
+    let (w, h) = (8usize, 8usize);
+    let mut water = vec![true; w * h];
+    let mut data = vec![0.0f32; w * h];
+    for r in 1..=2 {
+      for c in 1..=6 {
+        water[r * w + c] = false;
+        data[r * w + c] = 100.0;
+      }
+    }
+    let (labels, n) = label_landmasses(&water, w, h);
+    assert_eq!(n, 1);
+    let cache = CachedElevation {
+      data,
+      width: w,
+      height: h,
+      min_elev: 0.0,
+      max_elev: 100.0,
+      south: 45.0,
+      north: 46.0,
+      west: -74.0,
+      east: -73.0,
+      water_mask: Some(water),
+      labels: Some(labels),
+      n_landmasses: n,
+      lasso: None,
+    };
+    // rows 0–2, cols 0–3 of the raster → strip pixels rows 1–2 × cols 1–3
+    let ring = vec![[46.0, -74.0], [46.0, -73.5], [45.6, -73.5], [45.6, -74.0]];
+    let keep = lasso_footprint(&cache, ring).unwrap();
+    assert_eq!(
+      keep
+        .iter()
+        .filter(|&&k| k)
+        .count(),
+      6
+    );
+    for (i, &k) in keep.iter().enumerate() {
+      if k {
+        let (row, col) = (i / w, i % w);
+        assert!((1..=2).contains(&row) && (1..=3).contains(&col));
+      }
+    }
+  }
+
+  #[test]
+  fn lasso_without_water_mask_keeps_whole_polygon() {
+    let (w, h) = (8usize, 8usize);
+    let cache = CachedElevation {
+      data: vec![50.0; w * h],
+      width: w,
+      height: h,
+      min_elev: 50.0,
+      max_elev: 50.0,
+      south: 45.0,
+      north: 46.0,
+      west: -74.0,
+      east: -73.0,
+      water_mask: None,
+      labels: None,
+      n_landmasses: 0,
+      lasso: None,
+    };
+    let ring = vec![[46.0, -74.0], [46.0, -73.5], [45.6, -73.5], [45.6, -74.0]];
+    let keep = lasso_footprint(&cache, ring).unwrap();
+    // rows 0–2 × cols 0–3, nothing clipped away
+    assert_eq!(
+      keep
+        .iter()
+        .filter(|&&k| k)
+        .count(),
+      12
+    );
+  }
+
+  #[test]
+  fn degenerate_lassos_are_errors() {
+    let (cache, _) = two_block_cache();
+    assert!(lasso_footprint(&cache, vec![[45.5, -73.5], [45.6, -73.6]]).is_err());
+    // water-only region
+    let ring = vec![[46.0, -74.0], [46.0, -73.9], [45.95, -73.9], [45.95, -74.0]];
+    assert!(lasso_footprint(&cache, ring).is_err());
+  }
+
+  #[test]
   fn montreal_island_stl_is_watertight() {
     let body = montreal_fixture();
     let mask = mask_from_overpass(&body, 45.30, 45.75, -74.25, -73.3, 760, 500).unwrap();
@@ -694,6 +882,69 @@ mod tests {
     let data: Vec<f32> = (0..760 * 500).map(|i| 10.0 + (((i % 760) as f32) * 0.01)).collect();
     let stl = build_stl(&data, &footprint, 760, 500, 1.0, 2.0, 45.3, 45.75, -74.25, -73.3).unwrap();
     assert_watertight(&stl);
+  }
+
+  #[test]
+  fn upsample_bilinear_preserves_vertices_and_interpolates() {
+    let src = vec![0.0, 10.0, 20.0, 30.0]; // 2×2
+    let (out, w, h) = upsample_bilinear(&src, 2, 2, 2);
+    assert_eq!((w, h), (3, 3));
+    // source vertices land exactly on even output coordinates
+    assert_eq!(out[0], 0.0);
+    assert_eq!(out[2], 10.0);
+    assert_eq!(out[6], 20.0);
+    assert_eq!(out[8], 30.0);
+    // midpoints are averages
+    assert_eq!(out[1], 5.0);
+    assert_eq!(out[4], 15.0); // centre = mean of all four
+  }
+
+  #[test]
+  fn box_blur_keeps_constant_fields_constant() {
+    let mut data = vec![7.5f32; 5 * 4];
+    box_blur(&mut data, 5, 4, 2);
+    assert!(data.iter().all(|&v| (v - 7.5).abs() < 1e-6));
+  }
+
+  #[test]
+  fn smooth_upsample_full_footprint_stays_full() {
+    let data = vec![1.0f32; 4 * 4];
+    let fp = vec![true; 4 * 4];
+    let (_, fp_up, w, h) = smooth_upsample(&data, &fp, 4, 4, 3).unwrap();
+    assert_eq!((w, h), (10, 10));
+    assert!(fp_up.iter().all(|&b| b));
+  }
+
+  #[test]
+  fn smooth_upsample_chamfers_staircase_and_meshes_watertight() {
+    // diagonal staircase footprint on a 6×6 grid: true below the diagonal
+    let (w, h) = (6usize, 6usize);
+    let fp: Vec<bool> = (0..w * h).map(|i| i / w >= i % w).collect();
+    let data: Vec<f32> = (0..w * h).map(|i| 100.0 + ((i / w) as f32)).collect();
+    let factor = 2;
+    let (up_data, up_fp, uw, uh) = smooth_upsample(&data, &fp, w, h, factor).unwrap();
+
+    // smoothing must actually change the shape vs. nearest-neighbour upsampling
+    let nearest: Vec<bool> = (0..uw * uh)
+      .map(|i| {
+        let (r, c) = ((i / uw / factor).min(h - 1), (i % uw / factor).min(w - 1));
+        fp[r * w + c]
+      })
+      .collect();
+    assert_ne!(up_fp, nearest);
+
+    let stl = build_stl(&up_data, &up_fp, uw, uh, 1.0, 1.0, 45.0, 45.1, -73.1, -73.0).unwrap();
+    assert_watertight(&stl);
+  }
+
+  #[test]
+  fn smooth_upsample_of_vanishing_selection_is_an_error() {
+    // a single isolated pixel dissolves under blur+threshold
+    let (w, h) = (7usize, 7usize);
+    let mut fp = vec![false; w * h];
+    fp[3 * w + 3] = true;
+    let data = vec![1.0f32; w * h];
+    assert!(smooth_upsample(&data, &fp, w, h, 4).is_err());
   }
 
   #[test]
@@ -921,9 +1172,9 @@ async fn fetch_elevation(
     west,
     east,
     water_mask: cached_mask,
-    water_level,
     labels,
     n_landmasses,
+    lasso: None,
   });
 
   let cap = if preview_res == 0 { 256 } else { preview_res };
@@ -1123,13 +1374,18 @@ async fn export_stl(
   vertical_scale: f32,
   export_res: usize,
   base_mm: f32,
-  landmasses: Option<Vec<u32>>
+  landmasses: Option<Vec<u32>>,
+  lasso: Option<bool>,
+  smooth_factor: Option<usize>
 ) -> Result<String, String> {
   let ids = landmasses.unwrap_or_default();
   let (data, footprint, width, height, south, north, west, east) = {
     let guard = state.0.lock().unwrap();
     let c = guard.as_ref().ok_or("No terrain loaded — fetch first")?;
-    if ids.is_empty() {
+    if lasso.unwrap_or(false) {
+      let keep = c.lasso.as_ref().ok_or("No lasso selection — draw one first")?;
+      crop_to_footprint(c, keep)?
+    } else if ids.is_empty() {
       let n = c.width * c.height;
       (c.data.clone(), vec![true; n], c.width, c.height, c.south, c.north, c.west, c.east)
     } else {
@@ -1146,6 +1402,15 @@ async fn export_stl(
     (d, f, mw, mh)
   } else {
     (data, footprint, width, height)
+  };
+
+  // Edge smoothing: supersample the (possibly downsampled) mesh grid so
+  // footprint borders stop tracing pixel edges.
+  let smooth = smooth_factor.unwrap_or(1).clamp(1, 4);
+  let (mesh_data, mesh_footprint, mesh_w, mesh_h) = if smooth > 1 {
+    smooth_upsample(&mesh_data, &mesh_footprint, mesh_w, mesh_h, smooth)?
+  } else {
+    (mesh_data, mesh_footprint, mesh_w, mesh_h)
   };
 
   use tauri_plugin_dialog::DialogExt;
@@ -1180,19 +1445,33 @@ async fn export_stl(
   Ok(path.to_string_lossy().into_owned())
 }
 
-/// Extract one or more landmasses from the cache: crop to the union pixel
-/// bounding box and return the elevation crop plus a per-vertex footprint of
-/// the selected components, for footprint-clipped STL meshing.
+/// Extract one or more landmasses from the cache: build a footprint of the
+/// selected components and crop to it, for footprint-clipped STL meshing.
 #[allow(clippy::type_complexity)]
 fn crop_to_landmasses(
   c: &CachedElevation,
   labels: &[u32],
   ids: &[u32]
 ) -> Result<(Vec<f32>, Vec<bool>, usize, usize, f64, f64, f64, f64), String> {
+  let keep: Vec<bool> = labels
+    .iter()
+    .map(|l| ids.contains(l))
+    .collect();
+  crop_to_footprint(c, &keep)
+}
+
+/// Crop the cache to the pixel bounding box of `keep` (plus margin) and
+/// return the elevation crop plus the per-vertex footprint restricted to the
+/// crop window.
+#[allow(clippy::type_complexity)]
+fn crop_to_footprint(
+  c: &CachedElevation,
+  keep: &[bool]
+) -> Result<(Vec<f32>, Vec<bool>, usize, usize, f64, f64, f64, f64), String> {
   let (mut r0, mut r1, mut c0, mut c1) = (usize::MAX, 0usize, usize::MAX, 0usize);
   for row in 0..c.height {
     for col in 0..c.width {
-      if ids.contains(&labels[row * c.width + col]) {
+      if keep[row * c.width + col] {
         r0 = r0.min(row);
         r1 = r1.max(row);
         c0 = c0.min(col);
@@ -1201,7 +1480,7 @@ fn crop_to_landmasses(
     }
   }
   if r0 == usize::MAX {
-    return Err("Landmass not found".into());
+    return Err("Selection is empty".into());
   }
   const MARGIN: usize = 1;
   r0 = r0.saturating_sub(MARGIN);
@@ -1211,7 +1490,7 @@ fn crop_to_landmasses(
 
   let (w, h) = (c1 - c0 + 1, r1 - r0 + 1);
   if w < 2 || h < 2 {
-    return Err("Landmass too small to export".into());
+    return Err("Selection too small to export".into());
   }
 
   let mut data = Vec::with_capacity(w * h);
@@ -1220,7 +1499,7 @@ fn crop_to_landmasses(
     for col in c0..=c1 {
       let i = row * c.width + col;
       data.push(c.data[i]);
-      footprint.push(ids.contains(&labels[i]));
+      footprint.push(keep[i]);
     }
   }
 
@@ -1259,16 +1538,109 @@ async fn landmass_at(
     return Ok(None);
   }
 
-  let lat_center = (c.south + c.north) / 2.0;
-  let cell_m2 =
-    (((c.north - c.south) * 110_540.0) / (c.height as f64)) *
-    (((c.east - c.west) * 111_320.0 * ((lat_center * std::f64::consts::PI) / 180.0).cos()) /
-      (c.width as f64));
   let px_count = labels
     .iter()
     .filter(|&&l| l == id)
     .count();
-  Ok(Some(LandmassInfo { id, area_km2: ((px_count as f64) * cell_m2) / 1.0e6 }))
+  Ok(Some(LandmassInfo { id, area_km2: ((px_count as f64) * cell_area_m2(c)) / 1.0e6 }))
+}
+
+/// Ground area of one raster cell in m².
+fn cell_area_m2(c: &CachedElevation) -> f64 {
+  let lat_center = (c.south + c.north) / 2.0;
+  (((c.north - c.south) * 110_540.0) / (c.height as f64)) *
+    (((c.east - c.west) * 111_320.0 * ((lat_center * std::f64::consts::PI) / 180.0).cos()) /
+      (c.width as f64))
+}
+
+/// Rasterize a drawn lasso ring onto the cached grid and clip it to land
+/// when a water mask exists. The outline only needs to be rough: water
+/// inside it is dropped, so a coastline never has to be traced precisely —
+/// this is also the manual escape hatch for landmasses that label as one
+/// component through causeways or bridges.
+fn lasso_footprint(c: &CachedElevation, points: Vec<[f64; 2]>) -> Result<Vec<bool>, String> {
+  if points.len() < 3 {
+    return Err("Lasso needs at least 3 points".into());
+  }
+  let mut mask = vec![false; c.width * c.height];
+  rasterize_rings(&[points], c.south, c.north, c.west, c.east, c.width, c.height, &mut mask);
+  if let Some(water) = &c.water_mask {
+    for (m, &is_water) in mask.iter_mut().zip(water) {
+      *m = *m && !is_water;
+    }
+  }
+  if !mask.iter().any(|&m| m) {
+    return Err("Lasso contains no land".into());
+  }
+  Ok(mask)
+}
+
+#[derive(Debug, Serialize)]
+pub struct LassoInfo {
+  #[serde(rename = "areaKm2")]
+  pub area_km2: f64,
+}
+
+/// Store a freehand lasso selection (points are [lat, lng] pairs) and return
+/// its land area. The mask lives in the cache until the next fetch; export
+/// with `export_stl { lasso: true }`.
+#[tauri::command]
+async fn lasso_select(
+  state: tauri::State<'_, ElevationState>,
+  points: Vec<[f64; 2]>
+) -> Result<LassoInfo, String> {
+  let mut guard = state.0.lock().unwrap();
+  let c = guard.as_mut().ok_or("No terrain loaded — fetch first")?;
+  let mask = lasso_footprint(c, points)?;
+  let px = mask
+    .iter()
+    .filter(|&&m| m)
+    .count();
+  let area_km2 = ((px as f64) * cell_area_m2(c)) / 1.0e6;
+  c.lasso = Some(mask);
+  Ok(LassoInfo { area_km2 })
+}
+
+/// Render the lasso selection as a translucent RGBA PNG (data URL): selected
+/// pixels highlighted, remaining land faded back, water transparent — same
+/// styling as landmass_overlay with a selection.
+#[tauri::command]
+async fn lasso_overlay(state: tauri::State<'_, ElevationState>) -> Result<String, String> {
+  const MAX_DIM: usize = 1024;
+  let (lasso, land, width, height) = {
+    let guard = state.0.lock().unwrap();
+    let c = guard.as_ref().ok_or("No terrain loaded — fetch first")?;
+    let lasso = c.lasso.clone().ok_or("No lasso selection — draw one first")?;
+    let land: Option<Vec<bool>> = c.water_mask
+      .as_ref()
+      .map(|w|
+        w
+          .iter()
+          .map(|&is_water| !is_water)
+          .collect()
+      );
+    (lasso, land, c.width, c.height)
+  };
+
+  let (lasso, w, h) = downsample(&lasso, width, height, MAX_DIM);
+  let land = land.map(|l| downsample(&l, width, height, MAX_DIM).0);
+
+  let mut rgba = vec![0u8; w * h * 4];
+  for i in 0..w * h {
+    let (rgb, alpha): ([u8; 3], u8) = if lasso[i] {
+      ([255, 140, 0], 165)
+    } else if land.as_ref().is_some_and(|l| l[i]) {
+      ([130, 130, 130], 40)
+    } else {
+      continue;
+    };
+    rgba[i * 4..i * 4 + 3].copy_from_slice(&rgb);
+    rgba[i * 4 + 3] = alpha;
+  }
+
+  let png = encode_png_rgba(&rgba, w, h)?;
+  use base64::Engine;
+  Ok(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)))
 }
 
 /// Render the landmass segmentation as a translucent RGBA PNG (data URL) for
@@ -1385,7 +1757,15 @@ pub fn run() {
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_dialog::init())
     .invoke_handler(
-      tauri::generate_handler![fetch_elevation, export_stl, export_mask, landmass_at, landmass_overlay]
+      tauri::generate_handler![
+        fetch_elevation,
+        export_stl,
+        export_mask,
+        landmass_at,
+        landmass_overlay,
+        lasso_select,
+        lasso_overlay
+      ]
     )
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

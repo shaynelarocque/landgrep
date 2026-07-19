@@ -96,7 +96,8 @@ function TerrainMesh({ heightmap, bounds, verticalScale }: {
 }
 
 export default function TerrainPreview() {
-  const { heightmap, bounds, verticalScale, exportRes, baseMm, setHeightmap } = useStore()
+  const { heightmap, bounds, verticalScale, exportRes, baseMm, smoothFactor, setHeightmap } =
+    useStore()
   if (!heightmap || !bounds) return null
 
   async function handleExportStl() {
@@ -105,6 +106,7 @@ export default function TerrainPreview() {
         verticalScale,
         exportRes, // 0 = full resolution
         baseMm,
+        smoothFactor,
       })
       alert(`Saved to ${path}`)
     } catch (e) {

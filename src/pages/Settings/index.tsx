@@ -9,6 +9,13 @@ const EXPORT_RES_OPTIONS = [
   { value: 0, label: "Full resolution — may be very slow / large" },
 ]
 
+const SMOOTH_OPTIONS = [
+  { value: 1, label: "Off — mesh at export resolution" },
+  { value: 2, label: "2× — chamfered edges" },
+  { value: 3, label: "3× — smoother, 9× the triangles" },
+  { value: 4, label: "4× — smoothest, 16× the triangles" },
+]
+
 export default function Settings() {
   const {
     apiKey,
@@ -16,6 +23,7 @@ export default function Settings() {
     demType,
     exportRes,
     baseMm,
+    smoothFactor,
     waterMask,
     mapHome,
     setApiKey,
@@ -23,6 +31,7 @@ export default function Settings() {
     setDemType,
     setExportRes,
     setBaseMm,
+    setSmoothFactor,
     setWaterMask,
     setMapHome,
   } = useStore()
@@ -144,6 +153,27 @@ export default function Settings() {
             </select>
             <span className={styles.hint}>
               Resolution of the STL mesh. The 3D preview always uses 256 × 256 regardless.
+            </span>
+          </label>
+
+          <label className={styles.field} style={{ marginTop: 16 }}>
+            <span className={styles.label}>Edge smoothing</span>
+            <select
+              className={styles.select}
+              value={smoothFactor}
+              onChange={e => setSmoothFactor(parseInt(e.target.value))}
+            >
+              {SMOOTH_OPTIONS.map(o => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+            <span className={styles.hint}>
+              Supersamples the export so landmass borders come out chamfered and rounded
+              instead of pixelated. Interpolation only — it adds no real terrain detail, and
+              mesh size grows with the factor, so pair higher smoothing with a lower export
+              resolution.
             </span>
           </label>
 

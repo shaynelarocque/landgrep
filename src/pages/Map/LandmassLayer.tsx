@@ -14,6 +14,7 @@ export default function LandmassLayer({ drawMode }: { drawMode: boolean }) {
     setLandmassOverlay,
     selectedLandmasses,
     setSelectedLandmasses,
+    setLassoSelection,
   } = useStore()
 
   useMapEvents({
@@ -38,6 +39,7 @@ export default function LandmassLayer({ drawMode }: { drawMode: boolean }) {
           next = info ? [info] : []
         }
         setSelectedLandmasses(next)
+        setLassoSelection(null) // click-select replaces any lasso
         setLandmassOverlay(
           await invoke<string>("landmass_overlay", { selected: next.map(lm => lm.id) })
         )

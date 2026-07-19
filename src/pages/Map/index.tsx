@@ -4,10 +4,14 @@ import { Link } from "react-router"
 import "leaflet/dist/leaflet.css"
 import { useStore } from "../../data/store"
 import RectangleDraw from "./RectangleDraw"
+import LassoDraw from "./LassoDraw"
 import LandmassLayer from "./LandmassLayer"
 import BottomPanel from "./BottomPanel"
 import TerrainPreview from "./TerrainPreview"
 import styles from "./Map.module.css"
+
+/** Active map drawing tool; null = normal pan/click interaction. */
+export type DrawTool = "rect" | "lasso" | null
 
 // Syncs map position back to the store so Settings can capture it.
 function MapTracker() {
@@ -23,7 +27,7 @@ function MapTracker() {
 }
 
 export default function MapPage() {
-  const [drawMode, setDrawMode] = useState(false)
+  const [tool, setTool] = useState<DrawTool>(null)
   const { mapHome } = useStore()
 
   return (
@@ -47,11 +51,12 @@ export default function MapPage() {
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         />
         <MapTracker />
-        <RectangleDraw drawMode={drawMode} onDrawEnd={() => setDrawMode(false)} />
-        <LandmassLayer drawMode={drawMode} />
+        <RectangleDraw drawMode={tool === "rect"} onDrawEnd={() => setTool(null)} />
+        <LassoDraw active={tool === "lasso"} onDrawEnd={() => setTool(null)} />
+        <LandmassLayer drawMode={tool !== null} />
       </MapContainer>
 
-      <BottomPanel drawMode={drawMode} onToggleDraw={() => setDrawMode(d => !d)} />
+      <BottomPanel tool={tool} setTool={setTool} />
       <TerrainPreview />
     </div>
   )

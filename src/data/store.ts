@@ -26,6 +26,10 @@ export interface LandmassInfo {
   areaKm2: number
 }
 
+export interface LassoInfo {
+  areaKm2: number
+}
+
 export interface MapHome {
   lat: number
   lng: number
@@ -54,12 +58,17 @@ interface State {
   landmassOverlay: string | null
   /** Shift-click accumulates multiple landmasses into one selection. */
   selectedLandmasses: LandmassInfo[]
+  /** Freehand lasso selection (clipped to land); exclusive with landmass selection. */
+  lassoSelection: LassoInfo | null
   verticalScale: number
   demType: DemType
   /** Max pixel dimension of the mesh written to the STL file (0 = full res). */
   exportRes: number
   /** Thickness (mm) of the solid slab under the lowest terrain in exports. */
   baseMm: number
+  /** Edge-smoothing supersample factor for exports (1 = off, 2–4 = smoother
+   *  borders at factor× the mesh dimensions). */
+  smoothFactor: number
   waterMask: boolean
   mapHome: MapHome
   setApiKey: (key: string) => void
@@ -68,10 +77,12 @@ interface State {
   setFetchedBounds: (b: Bounds | null) => void
   setLandmassOverlay: (url: string | null) => void
   setSelectedLandmasses: (lms: LandmassInfo[]) => void
+  setLassoSelection: (l: LassoInfo | null) => void
   setVerticalScale: (scale: number) => void
   setDemType: (t: DemType) => void
   setExportRes: (r: number) => void
   setBaseMm: (mm: number) => void
+  setSmoothFactor: (f: number) => void
   setWaterMask: (v: boolean) => void
   setMapHome: (home: MapHome) => void
 }
@@ -95,10 +106,12 @@ export const useStore = create<State>()(set => ({
   fetchedBounds: null,
   landmassOverlay: null,
   selectedLandmasses: [],
+  lassoSelection: null,
   verticalScale: parseFloat(load("vertical-scale", "1.5")),
   demType: (load("dem-type", "SRTMGL3") as DemType),
   exportRes: parseInt(load("export-res", "512")),
   baseMm: parseFloat(load("base-mm", "2")),
+  smoothFactor: parseInt(load("smooth-factor", "1")),
   waterMask: load("water-mask", "true") === "true",
   mapHome: loadJson("map-home", DEFAULT_HOME),
   setApiKey: key => {
@@ -110,6 +123,7 @@ export const useStore = create<State>()(set => ({
   setFetchedBounds: b => set({ fetchedBounds: b }),
   setLandmassOverlay: url => set({ landmassOverlay: url }),
   setSelectedLandmasses: lms => set({ selectedLandmasses: lms }),
+  setLassoSelection: l => set({ lassoSelection: l }),
   setVerticalScale: scale => {
     localStorage.setItem("vertical-scale", String(scale))
     set({ verticalScale: scale })
@@ -125,6 +139,10 @@ export const useStore = create<State>()(set => ({
   setBaseMm: mm => {
     localStorage.setItem("base-mm", String(mm))
     set({ baseMm: mm })
+  },
+  setSmoothFactor: f => {
+    localStorage.setItem("smooth-factor", String(f))
+    set({ smoothFactor: f })
   },
   setWaterMask: v => {
     localStorage.setItem("water-mask", String(v))
