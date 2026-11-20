@@ -214,6 +214,75 @@
   flex: 1;
 }
 
+/* ── Sea level ──────────────────────────────────────────────── */
+.sea {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.seaHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.seaTitle {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #e8e8e8;
+}
+
+.seaValue {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #7fb0e0;
+  font-variant-numeric: tabular-nums;
+}
+
+.seaRange {
+  width: 100%;
+  accent-color: #4a80b5;
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  cursor: pointer;
+}
+
+.seaMarks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.seaMark {
+  font-size: 0.66rem;
+  padding: 2px 8px;
+  border-radius: 10px !important;
+  background: rgba(255, 255, 255, 0.05) !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+  color: #aaa !important;
+}
+
+.seaMark:hover {
+  border-color: rgba(127, 176, 224, 0.6) !important;
+  color: #ddd !important;
+}
+
+.seaMarkActive {
+  background: rgba(74, 128, 181, 0.2) !important;
+  border-color: #4a80b5 !important;
+  color: #cfe3f7 !important;
+}
+
+.seaReport {
+  min-height: 1.2em;
+  font-size: 0.7rem;
+  color: #888;
+}
+
 .exportRow {
   display: flex;
   gap: 8px;

@@ -14,7 +14,7 @@ use crate::selection::{
 };
 use crate::mesh::build_stl;
 use crate::ocean::{ flood_ocean_from_border, ocean_ring_group };
-use crate::water::{ fetch_water_geometry, flatten_water, rasterize_ring_groups };
+use crate::water::{ WaterGeometry, fetch_water_geometry, flatten_water, rasterize_ring_groups };
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Heightmap {
@@ -34,6 +34,12 @@ pub struct Heightmap {
   /// Number of connected land components; None when no mask was built.
   #[serde(rename = "landmassCount")]
   pub landmass_count: Option<u32>,
+  /// Water mask at preview resolution (1 = water), so the preview can tell
+  /// water from dry land that sits below the water level.
+  pub water: Option<Vec<u8>>,
+  /// Land area left above water; None when no mask was built.
+  #[serde(rename = "landKm2")]
+  pub land_km2: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -41,6 +47,16 @@ pub struct LandmassInfo {
   pub id: u32,
   #[serde(rename = "areaKm2")]
   pub area_km2: f64,
+  /// Sea level at which the last of it goes under: its highest point.
+  #[serde(rename = "submergedAt")]
+  pub submerged_at: f32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SeaLevelResult {
+  pub heightmap: Heightmap,
+  /// Landmass overlay for the new coastline (data URL); None without a mask.
+  pub overlay: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,6 +75,42 @@ fn encode_png_rgba(rgba: &[u8], width: usize, height: usize) -> Result<Vec<u8>, 
     writer.write_image_data(rgba).map_err(|e| e.to_string())?;
   }
   Ok(out)
+}
+
+/// Downsampled preview of the cached terrain, plus the stats the UI shows.
+fn heightmap_preview(
+  c: &CachedElevation,
+  preview_res: usize,
+  water_level: Option<f32>,
+  water_mask_error: Option<String>
+) -> Heightmap {
+  let cap = if preview_res == 0 { 256 } else { preview_res };
+  let (data, width, height) = downsample(&c.data, c.width, c.height, cap);
+  let water = c.water_mask.as_ref().map(|m| {
+    downsample(m, c.width, c.height, cap)
+      .0.into_iter()
+      .map(u8::from)
+      .collect()
+  });
+  let land_km2 = c.water_mask.as_ref().map(|m| {
+    let land_px = m
+      .iter()
+      .filter(|&&w| !w)
+      .count();
+    ((land_px as f64) * cell_area_m2(c)) / 1.0e6
+  });
+  Heightmap {
+    data,
+    width,
+    height,
+    min_elev: c.data.iter().copied().fold(f32::INFINITY, f32::min),
+    max_elev: c.data.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+    water_level,
+    water_mask_error,
+    landmass_count: c.labels.as_ref().map(|_| c.n_landmasses),
+    water,
+    land_km2,
+  }
 }
 
 #[tauri::command]
@@ -89,16 +141,45 @@ pub async fn fetch_elevation(
     .bytes().await
     .map_err(|e| e.to_string())?;
 
-  let (mut full_data, width, height) = parse_geotiff(bytes.to_vec())?;
+  let (full_data, width, height) = parse_geotiff(bytes.to_vec())?;
+  let water = if water_mask {
+    Some(fetch_water_geometry(south, north, west, east).await)
+  } else {
+    None
+  };
 
+  let (cache, water_level, water_mask_error) = build_terrain(
+    full_data,
+    width,
+    height,
+    (south, north, west, east),
+    water
+  );
+  let preview = heightmap_preview(&cache, preview_res, water_level, water_mask_error);
+  *state.0.lock().unwrap() = Some(cache);
+  Ok(preview)
+}
+
+/// Everything fetch_elevation does once the downloads are in: mask the water
+/// (closing coastlines into an ocean, or flood-filling one), flatten it and
+/// label the landmasses. `water` is the Overpass result, None when the water
+/// mask is off. No network, so fixtures can drive it. Returns the cache, the
+/// water level and any water-mask error for the preview.
+pub(crate) fn build_terrain(
+  mut full_data: Vec<f32>,
+  width: usize,
+  height: usize,
+  (south, north, west, east): (f64, f64, f64, f64),
+  water: Option<Result<WaterGeometry, String>>
+) -> (CachedElevation, Option<f32>, Option<String>) {
   let mut water_level: Option<f32> = None;
   let mut water_mask_error: Option<String> = None;
   let mut cached_mask: Option<Vec<bool>> = None;
   let mut cached_rings: Option<Vec<crate::water::RingGroup>> = None;
   let mut labels: Option<Vec<u32>> = None;
   let mut n_landmasses = 0u32;
-  if water_mask {
-    match fetch_water_geometry(south, north, west, east).await {
+  if let Some(result) = water {
+    match result {
       Ok(geo) => {
         let mut rings = geo.water_groups;
         // Open sea only exists in OSM as natural=coastline ways; close them
@@ -141,10 +222,9 @@ pub async fn fetch_elevation(
 
   let min_elev = full_data.iter().cloned().fold(f32::INFINITY, f32::min);
   let max_elev = full_data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-  let landmass_count = labels.as_ref().map(|_| n_landmasses);
 
-  *state.0.lock().unwrap() = Some(CachedElevation {
-    data: full_data.clone(),
+  let cache = CachedElevation {
+    data: full_data,
     width,
     height,
     min_elev,
@@ -159,21 +239,32 @@ pub async fn fetch_elevation(
     n_landmasses,
     lasso: None,
     lasso_ring: None,
-  });
+    sea: Default::default(),
+  };
+  (cache, water_level, water_mask_error)
+}
 
-  let cap = if preview_res == 0 { 256 } else { preview_res };
-  let (preview_data, pw, ph) = downsample(&full_data, width, height, cap);
-
-  Ok(Heightmap {
-    data: preview_data,
-    width: pw,
-    height: ph,
-    min_elev,
-    max_elev,
-    water_level,
-    water_mask_error,
-    landmass_count,
-  })
+/// Raise the sea to `level` metres (None, or ≤ 0, puts the fetched
+/// coastline back) and return the new preview and landmass overlay in one
+/// round trip, since the slider calls this as it moves. Any selection is
+/// dropped: landmass ids don't survive a new coastline.
+#[tauri::command]
+pub async fn set_sea_level(
+  state: tauri::State<'_, ElevationState>,
+  level: Option<f32>,
+  preview_res: usize
+) -> Result<SeaLevelResult, String> {
+  let mut guard = state.0.lock().unwrap();
+  let c = guard.as_mut().ok_or("No terrain loaded — fetch first")?;
+  let water_level = c.set_sea_level(level);
+  let overlay = match &c.labels {
+    Some(labels) => {
+      let drowned = c.drowned();
+      Some(render_landmass_overlay(labels, drowned.as_deref(), c.width, c.height, c.n_landmasses, &[])?)
+    }
+    None => None,
+  };
+  Ok(SeaLevelResult { heightmap: heightmap_preview(c, preview_res, water_level, None), overlay })
 }
 
 #[tauri::command]
@@ -207,8 +298,16 @@ pub async fn export_stl(
       crop_to_landmasses(c, labels, &ids)?
     };
     // vector geometry only needed for the smoothed-export path
-    let water_rings = if smooth > 1 { c.water_rings.clone() } else { None };
-    let lasso_ring = if smooth > 1 && use_lasso { c.lasso_ring.clone() } else { None };
+    let water_rings = if smooth > 1 { c.current_water_rings().cloned() } else { None };
+    // The vector lasso is only clipped to water through the rings, so with
+    // water the rings don't describe (a raised sea, or the raster ocean
+    // fallback) it would put the water back: smooth the raster lasso instead.
+    let rings_clip_lasso = water_rings.is_some() || c.water_mask.is_none();
+    let lasso_ring = if smooth > 1 && use_lasso && rings_clip_lasso {
+      c.lasso_ring.clone()
+    } else {
+      None
+    };
     (crop, water_rings, lasso_ring)
   };
   let (data, footprint, width, height, south, north, west, east) = crop;
@@ -300,11 +399,20 @@ pub async fn landmass_at(
     return Ok(None);
   }
 
-  let px_count = labels
-    .iter()
-    .filter(|&&l| l == id)
-    .count();
-  Ok(Some(LandmassInfo { id, area_km2: ((px_count as f64) * cell_area_m2(c)) / 1.0e6 }))
+  let (mut px_count, mut highest) = (0usize, f32::NEG_INFINITY);
+  for (&l, &elev) in labels.iter().zip(&c.data) {
+    if l == id {
+      px_count += 1;
+      highest = highest.max(elev);
+    }
+  }
+  Ok(
+    Some(LandmassInfo {
+      id,
+      area_km2: ((px_count as f64) * cell_area_m2(c)) / 1.0e6,
+      submerged_at: highest,
+    })
+  )
 }
 
 /// Store a freehand lasso selection (points are [lat, lng] pairs) and return
@@ -329,47 +437,53 @@ pub async fn lasso_select(
 }
 
 /// Render the landmass segmentation as a translucent RGBA PNG (data URL) for
-/// use as a georeferenced Leaflet image overlay. Water is transparent. With
-/// `selected`, that landmass is highlighted and the rest fade back.
+/// use as a georeferenced Leaflet image overlay. Water is transparent, except
+/// land a raised sea has drowned, which is painted as water. With `selected`,
+/// that landmass is highlighted and the rest fade back.
 #[tauri::command]
 pub async fn landmass_overlay(
   state: tauri::State<'_, ElevationState>,
   selected: Option<Vec<u32>>
 ) -> Result<String, String> {
   let selected = selected.unwrap_or_default();
-  const MAX_DIM: usize = 1024;
-  let (labels, width, height, n_landmasses) = {
+  let (labels, drowned, width, height, n_landmasses) = {
     let guard = state.0.lock().unwrap();
     let c = guard.as_ref().ok_or("No terrain loaded — fetch first")?;
     let labels = c.labels
       .clone()
       .ok_or("No landmass data — fetch with the water mask enabled")?;
-    (labels, c.width, c.height, c.n_landmasses)
+    (labels, c.drowned(), c.width, c.height, c.n_landmasses)
   };
-  let slots = landmass_palette_slots(&labels, n_landmasses);
+  render_landmass_overlay(&labels, drowned.as_deref(), width, height, n_landmasses, &selected)
+}
+
+/// Land a raised sea has drowned, on the map overlays: the preview's water.
+const DROWNED: ([u8; 3], u8) = ([74, 128, 181], 150);
+
+/// landmass_overlay's image, shared with set_sea_level.
+fn render_landmass_overlay(
+  labels: &[u32],
+  drowned: Option<&[bool]>,
+  width: usize,
+  height: usize,
+  n_landmasses: u32,
+  selected: &[u32]
+) -> Result<String, String> {
+  const MAX_DIM: usize = 1024;
+  let slots = landmass_palette_slots(labels, n_landmasses);
 
   // nearest-sample downsample, same scheme as elevation preview
-  let (labels, w, h) = if width <= MAX_DIM && height <= MAX_DIM {
-    (labels, width, height)
-  } else {
-    let scale = (width.max(height) + MAX_DIM - 1) / MAX_DIM;
-    let dw = (width + scale - 1) / scale;
-    let dh = (height + scale - 1) / scale;
-    let mut out = vec![0u32; dw * dh];
-    for row in 0..dh {
-      for col in 0..dw {
-        out[row * dw + col] = labels[(row * scale).min(height - 1) * width + (col * scale).min(width - 1)];
-      }
-    }
-    (out, dw, dh)
-  };
+  let (labels, w, h) = downsample(labels, width, height, MAX_DIM);
+  let drowned = drowned.map(|d| downsample(d, width, height, MAX_DIM).0);
 
   let mut rgba = vec![0u8; w * h * 4];
   for (i, &id) in labels.iter().enumerate() {
-    if id == 0 {
-      continue; // water stays transparent
-    }
-    let (rgb, alpha) = if selected.contains(&id) {
+    let (rgb, alpha) = if id == 0 {
+      if !drowned.as_ref().is_some_and(|d| d[i]) {
+        continue; // water stays transparent
+      }
+      DROWNED
+    } else if selected.contains(&id) {
       ([255u8, 140, 0], 165u8)
     } else if !selected.is_empty() {
       ([130u8, 130, 130], 40u8)
@@ -386,12 +500,12 @@ pub async fn landmass_overlay(
 }
 
 /// Render the lasso selection as a translucent RGBA PNG (data URL): selected
-/// pixels highlighted, remaining land faded back, water transparent — same
-/// styling as landmass_overlay with a selection.
+/// pixels highlighted, remaining land faded back, water transparent (drowned
+/// land painted as water) — same styling as landmass_overlay with a selection.
 #[tauri::command]
 pub async fn lasso_overlay(state: tauri::State<'_, ElevationState>) -> Result<String, String> {
   const MAX_DIM: usize = 1024;
-  let (lasso, land, width, height) = {
+  let (lasso, land, drowned, width, height) = {
     let guard = state.0.lock().unwrap();
     let c = guard.as_ref().ok_or("No terrain loaded — fetch first")?;
     let lasso = c.lasso.clone().ok_or("No lasso selection — draw one first")?;
@@ -403,11 +517,12 @@ pub async fn lasso_overlay(state: tauri::State<'_, ElevationState>) -> Result<St
           .map(|&is_water| !is_water)
           .collect()
       );
-    (lasso, land, c.width, c.height)
+    (lasso, land, c.drowned(), c.width, c.height)
   };
 
   let (lasso, w, h) = downsample(&lasso, width, height, MAX_DIM);
   let land = land.map(|l| downsample(&l, width, height, MAX_DIM).0);
+  let drowned = drowned.map(|d| downsample(&d, width, height, MAX_DIM).0);
 
   let mut rgba = vec![0u8; w * h * 4];
   for i in 0..w * h {
@@ -415,6 +530,8 @@ pub async fn lasso_overlay(state: tauri::State<'_, ElevationState>) -> Result<St
       ([255, 140, 0], 165)
     } else if land.as_ref().is_some_and(|l| l[i]) {
       ([130, 130, 130], 40)
+    } else if drowned.as_ref().is_some_and(|d| d[i]) {
+      DROWNED
     } else {
       continue;
     };

@@ -1,9 +1,8 @@
 import { useState } from "react"
 import { invoke } from "@tauri-apps/api/core"
-import { useStore, type Heightmap, type Bounds } from "../../data/store"
+import { useStore, PREVIEW_RES, type Heightmap, type Bounds } from "../../data/store"
+import { seaMarks } from "../../data/sea"
 import type { DrawTool } from "./index"
-
-const PREVIEW_RES = 256 // pixels sent to the 3D preview over IPC
 import styles from "./Map.module.css"
 
 interface Props {
@@ -16,7 +15,7 @@ export default function BottomPanel({ tool, setTool }: Props) {
     apiKey, bounds, setBounds, setHeightmap, demType, waterMask,
     heightmap, verticalScale, exportRes, baseMm, smoothFactor,
     selectedLandmasses, setSelectedLandmasses, setLandmassOverlay, setFetchedBounds,
-    lassoSelection, setLassoSelection,
+    lassoSelection, setLassoSelection, setSeaLevel, setFetchedStats, setSeaMarks,
   } = useStore()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -46,11 +45,14 @@ export default function BottomPanel({ tool, setTool }: Props) {
       setFetchedBounds(bounds)
       setSelectedLandmasses([])
       setLassoSelection(null)
+      setSeaLevel(0)
+      setFetchedStats({ maxElev: result.maxElev, landKm2: result.landKm2 })
       if (result.landmassCount) {
         setLandmassOverlay(await invoke<string>("landmass_overlay", {}).catch(() => null))
       } else {
         setLandmassOverlay(null)
       }
+      setSeaMarks(await seaMarks(bounds, result))
     } catch (e) {
       setError(String(e))
     } finally {
@@ -166,6 +168,8 @@ export default function BottomPanel({ tool, setTool }: Props) {
               : `${selectedLandmasses.length} landmasses`}
             {" · "}
             {fmtArea(selectedLandmasses.reduce((sum, lm) => sum + lm.areaKm2, 0))} km²
+            {" · gone at +"}
+            {Math.max(0, Math.ceil(Math.max(...selectedLandmasses.map(lm => lm.submergedAt))))} m
           </span>
           <button
             className={styles.fetchBtn}
