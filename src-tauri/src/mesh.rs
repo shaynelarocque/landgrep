@@ -29,7 +29,7 @@ fn write_tri(buf: &mut Vec<u8>, v0: [f32; 3], v1: [f32; 3], v2: [f32; 3]) {
 /// its corner vertices are inside the footprint, so a landmass export
 /// contains that shape alone — not its bounding rectangle. Relief is
 /// measured above the footprint's minimum elevation and sits on a
-/// `base_mm`-thick slab.
+/// `base_mm`-thick slab. Model axes are +x east, +y north, +z up.
 pub(crate) fn build_stl(
   data: &[f32],
   footprint: &[bool],
@@ -70,16 +70,19 @@ pub(crate) fn build_stl(
   };
   let base = base_mm.max(0.4); // degenerate walls below ~one layer height
 
+  // Raster rows run north → south, but +y is north in the model, so rows
+  // count down from the top. Counting them up instead (y = row) reflects the
+  // terrain: east stays on the right and north lands at the front, which no
+  // rotation in a slicer can undo.
+  let y_of = |row: usize| ((height - 1 - row) as f32) * cell_y;
   let v = |col: usize, row: usize| -> [f32; 3] {
     [
       (col as f32) * cell_x,
-      (row as f32) * cell_y,
+      y_of(row),
       (data[row * width + col] - min_elev).max(0.0) * elev_scale + base,
     ]
   };
-  let vb = |col: usize, row: usize| -> [f32; 3] {
-    [(col as f32) * cell_x, (row as f32) * cell_y, 0.0]
-  };
+  let vb = |col: usize, row: usize| -> [f32; 3] { [(col as f32) * cell_x, y_of(row), 0.0] };
   // cell (col,row) spans vertices (col..col+1, row..row+1)
   let (cw, ch) = (width - 1, height - 1);
   let mut cells = vec![false; cw * ch];
@@ -129,38 +132,39 @@ pub(crate) fn build_stl(
       if !cell(col as isize, row as isize) {
         continue;
       }
-      let (bl, br) = (v(col, row), v(col + 1, row));
-      let (tl, tr) = (v(col, row + 1), v(col + 1, row + 1));
-      let (bbl, bbr) = (vb(col, row), vb(col + 1, row));
-      let (btl, btr) = (vb(col, row + 1), vb(col + 1, row + 1));
+      // cell corners by compass point (row = north edge, row + 1 = south)
+      let (nw, ne) = (v(col, row), v(col + 1, row));
+      let (sw, se) = (v(col, row + 1), v(col + 1, row + 1));
+      let (bnw, bne) = (vb(col, row), vb(col + 1, row));
+      let (bsw, bse) = (vb(col, row + 1), vb(col + 1, row + 1));
 
       // top (+z) and mirrored bottom (-z)
-      write_tri(&mut buf, bl, br, tl);
-      write_tri(&mut buf, br, tr, tl);
-      write_tri(&mut buf, bbl, btl, bbr);
-      write_tri(&mut buf, bbr, btl, btr);
+      write_tri(&mut buf, sw, se, ne);
+      write_tri(&mut buf, sw, ne, nw);
+      write_tri(&mut buf, bsw, bne, bse);
+      write_tri(&mut buf, bsw, bnw, bne);
 
       // walls wherever the neighbouring cell is outside the footprint
       let (ci, ri) = (col as isize, row as isize);
       if !cell(ci, ri - 1) {
-        // -y side
-        write_tri(&mut buf, bbl, bbr, bl);
-        write_tri(&mut buf, bbr, br, bl);
+        // north side (+y)
+        write_tri(&mut buf, bne, bnw, ne);
+        write_tri(&mut buf, bnw, nw, ne);
       }
       if !cell(ci, ri + 1) {
-        // +y side
-        write_tri(&mut buf, btr, btl, tr);
-        write_tri(&mut buf, btl, tl, tr);
+        // south side (-y)
+        write_tri(&mut buf, bsw, bse, sw);
+        write_tri(&mut buf, bse, se, sw);
       }
       if !cell(ci - 1, ri) {
-        // -x side
-        write_tri(&mut buf, bbl, bl, btl);
-        write_tri(&mut buf, btl, bl, tl);
+        // west side (-x)
+        write_tri(&mut buf, bnw, bsw, nw);
+        write_tri(&mut buf, bsw, sw, nw);
       }
       if !cell(ci + 1, ri) {
-        // +x side
-        write_tri(&mut buf, bbr, btr, br);
-        write_tri(&mut buf, btr, tr, br);
+        // east side (+x)
+        write_tri(&mut buf, bse, bne, se);
+        write_tri(&mut buf, bne, ne, se);
       }
     }
   }
@@ -209,6 +213,39 @@ mod tests {
     // clipped: fewer top cells than the full 6×6 grid would produce
     let n = u32::from_le_bytes(stl[80..84].try_into().unwrap()) as usize;
     assert!(n < 4 * (w - 1) * (h - 1) + 4 * (w - 1) + 4 * (h - 1));
+  }
+
+  /// Every triangle corner, in file order.
+  fn vertices(stl: &[u8]) -> Vec<[f32; 3]> {
+    let n = u32::from_le_bytes(stl[80..84].try_into().unwrap()) as usize;
+    let f = |o: usize| f32::from_le_bytes(stl[o..o + 4].try_into().unwrap());
+    (0..n * 3)
+      .map(|k| {
+        let off = 84 + (k / 3) * 50 + 12 + (k % 3) * 12;
+        [f(off), f(off + 4), f(off + 8)]
+      })
+      .collect()
+  }
+
+  #[test]
+  fn exports_are_not_from_the_mirror_universe() {
+    // A lone peak in the raster's northeast corner (row 0 = north, last
+    // column = east) has to print at the model's +x/+y corner. It used to
+    // print at +x/−y: the terrain's mirror image, Laval on the South Shore.
+    let (w, h) = (5usize, 5usize);
+    let mut data = vec![0.0f32; w * h];
+    data[w - 1] = 100.0;
+    let stl = build_stl(&data, &vec![true; w * h], w, h, 1.0, 2.0, 45.0, 45.1, -73.1, -73.0).unwrap();
+    assert_watertight(&stl);
+    let vs = vertices(&stl);
+    let peak = vs
+      .iter()
+      .copied()
+      .max_by(|a, b| a[2].total_cmp(&b[2]))
+      .unwrap();
+    let max_x = vs.iter().map(|v| v[0]).fold(f32::MIN, f32::max);
+    let max_y = vs.iter().map(|v| v[1]).fold(f32::MIN, f32::max);
+    assert_eq!((peak[0], peak[1]), (max_x, max_y), "the NE peak should sit at +x/+y");
   }
 
   #[test]
