@@ -96,7 +96,7 @@ pub(crate) fn two_block_cache() -> (CachedElevation, Vec<u32>) {
     n_landmasses: n,
     lasso: None,
     lasso_ring: None,
-    sea: Default::default(),
+    edits: Default::default(),
   };
   (cache, labels)
 }

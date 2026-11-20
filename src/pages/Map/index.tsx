@@ -6,12 +6,14 @@ import { useStore } from "../../data/store"
 import RectangleDraw from "./RectangleDraw"
 import LassoDraw from "./LassoDraw"
 import LandmassLayer from "./LandmassLayer"
+import CarveDraw from "./CarveDraw"
+import CarveBar from "./CarveBar"
 import BottomPanel from "./BottomPanel"
 import TerrainPreview from "./TerrainPreview"
 import styles from "./Map.module.css"
 
 /** Active map drawing tool; null = normal pan/click interaction. */
-export type DrawTool = "rect" | "lasso" | null
+export type DrawTool = "rect" | "lasso" | "carve" | null
 
 // One owner for dragging and the cursor: when each tool set them itself,
 // switching straight from one tool to another let the one turning off
@@ -19,7 +21,8 @@ export type DrawTool = "rect" | "lasso" | null
 function ToolCursor({ tool }: { tool: DrawTool }) {
   const map = useMap()
   useEffect(() => {
-    if (tool) map.dragging.disable()
+    // drags draw rectangles and lassos; carving is a click, so the map pans
+    if (tool === "rect" || tool === "lasso") map.dragging.disable()
     else map.dragging.enable()
     map.getContainer().style.cursor = tool ? "crosshair" : ""
   }, [tool, map])
@@ -68,9 +71,11 @@ export default function MapPage() {
         <ToolCursor tool={tool} />
         <RectangleDraw drawMode={tool === "rect"} onDrawEnd={() => setTool(null)} />
         <LassoDraw active={tool === "lasso"} onDrawEnd={() => setTool(null)} />
+        <CarveDraw active={tool === "carve"} />
         <LandmassLayer drawMode={tool !== null} />
       </MapContainer>
 
+      {tool === "carve" && <CarveBar onDone={() => setTool(null)} />}
       <BottomPanel tool={tool} setTool={setTool} />
       <TerrainPreview />
     </div>

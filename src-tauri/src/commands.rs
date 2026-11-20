@@ -2,6 +2,7 @@ use serde::{ Deserialize, Serialize };
 
 use crate::{ CachedElevation, ElevationState };
 use crate::geotiff::parse_geotiff;
+use crate::glyphs::Carving;
 use crate::grid::{ downsample, smooth_upsample, upsample_bilinear };
 use crate::landmass::{ LANDMASS_PALETTE, label_landmasses, landmass_palette_slots };
 use crate::selection::{
@@ -52,11 +53,16 @@ pub struct LandmassInfo {
   pub submerged_at: f32,
 }
 
+/// What changing the terrain (sea level, carvings) sends back, in one round
+/// trip: the new preview and landmass overlay.
 #[derive(Debug, Serialize)]
-pub struct SeaLevelResult {
+pub struct TerrainUpdate {
   pub heightmap: Heightmap,
   /// Landmass overlay for the new coastline (data URL); None without a mask.
   pub overlay: Option<String>,
+  /// Highest point the latest carving left.
+  #[serde(rename = "carvedTop")]
+  pub carved_top: Option<f32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -239,32 +245,88 @@ pub(crate) fn build_terrain(
     n_landmasses,
     lasso: None,
     lasso_ring: None,
-    sea: Default::default(),
+    edits: Default::default(),
   };
   (cache, water_level, water_mask_error)
 }
 
+fn terrain_update(
+  c: &CachedElevation,
+  preview_res: usize,
+  water_level: Option<f32>
+) -> Result<TerrainUpdate, String> {
+  let overlay = match &c.labels {
+    Some(labels) => {
+      Some(render_landmass_overlay(labels, &Paint::of(c), c.width, c.height, c.n_landmasses, &[])?)
+    }
+    None => None,
+  };
+  Ok(TerrainUpdate {
+    heightmap: heightmap_preview(c, preview_res, water_level, None),
+    overlay,
+    carved_top: c.edits.carved_top,
+  })
+}
+
 /// Raise the sea to `level` metres (None, or ≤ 0, puts the fetched
-/// coastline back) and return the new preview and landmass overlay in one
-/// round trip, since the slider calls this as it moves. Any selection is
+/// coastline back). The slider calls this as it moves. Any selection is
 /// dropped: landmass ids don't survive a new coastline.
 #[tauri::command]
 pub async fn set_sea_level(
   state: tauri::State<'_, ElevationState>,
   level: Option<f32>,
   preview_res: usize
-) -> Result<SeaLevelResult, String> {
+) -> Result<TerrainUpdate, String> {
   let mut guard = state.0.lock().unwrap();
   let c = guard.as_mut().ok_or("No terrain loaded — fetch first")?;
   let water_level = c.set_sea_level(level);
-  let overlay = match &c.labels {
-    Some(labels) => {
-      let drowned = c.drowned();
-      Some(render_landmass_overlay(labels, drowned.as_deref(), c.width, c.height, c.n_landmasses, &[])?)
-    }
-    None => None,
-  };
-  Ok(SeaLevelResult { heightmap: heightmap_preview(c, preview_res, water_level, None), overlay })
+  terrain_update(c, preview_res, water_level)
+}
+
+/// Carve `text` into the terrain, centred on (lat, lng): capitals
+/// `letter_height_m` tall, raised by `relief_m` (negative engraves). Letters
+/// raised out of water become land. Survives sea-level changes; undo with
+/// `undo_carving`.
+#[tauri::command]
+pub async fn carve_text(
+  state: tauri::State<'_, ElevationState>,
+  text: String,
+  lat: f64,
+  lng: f64,
+  letter_height_m: f64,
+  relief_m: f32,
+  preview_res: usize
+) -> Result<TerrainUpdate, String> {
+  let text = text.trim().to_string();
+  if text.is_empty() {
+    return Err("Nothing to carve".into());
+  }
+  if text.chars().count() > 60 {
+    return Err("That's a lot of name. 60 characters, tops.".into());
+  }
+  if !(letter_height_m > 0.0 && letter_height_m.is_finite() && relief_m.is_finite()) {
+    return Err("Letters need a positive size and a finite relief".into());
+  }
+  let mut guard = state.0.lock().unwrap();
+  let c = guard.as_mut().ok_or("No terrain loaded — fetch first")?;
+  let water_level = c.carve(Carving { text, lat, lng, letter_height_m, relief_m });
+  if c.edits.carved_top.is_none() {
+    c.uncarve();
+    return Err("That missed the terrain".into());
+  }
+  terrain_update(c, preview_res, water_level)
+}
+
+/// Take back the latest carving.
+#[tauri::command]
+pub async fn undo_carving(
+  state: tauri::State<'_, ElevationState>,
+  preview_res: usize
+) -> Result<TerrainUpdate, String> {
+  let mut guard = state.0.lock().unwrap();
+  let c = guard.as_mut().ok_or("No terrain loaded — fetch first")?;
+  let water_level = c.uncarve();
+  terrain_update(c, preview_res, water_level)
 }
 
 #[tauri::command]
@@ -446,24 +508,53 @@ pub async fn landmass_overlay(
   selected: Option<Vec<u32>>
 ) -> Result<String, String> {
   let selected = selected.unwrap_or_default();
-  let (labels, drowned, width, height, n_landmasses) = {
+  let (labels, paint, width, height, n_landmasses) = {
     let guard = state.0.lock().unwrap();
     let c = guard.as_ref().ok_or("No terrain loaded — fetch first")?;
     let labels = c.labels
       .clone()
       .ok_or("No landmass data — fetch with the water mask enabled")?;
-    (labels, c.drowned(), c.width, c.height, c.n_landmasses)
+    (labels, Paint::of(c), c.width, c.height, c.n_landmasses)
   };
-  render_landmass_overlay(&labels, drowned.as_deref(), width, height, n_landmasses, &selected)
+  render_landmass_overlay(&labels, &paint, width, height, n_landmasses, &selected)
 }
 
-/// Land a raised sea has drowned, on the map overlays: the preview's water.
-const DROWNED: ([u8; 3], u8) = ([74, 128, 181], 150);
+/// What the edits add to the map overlays, copied out of the cache so the
+/// PNGs encode without holding the lock: land a raised sea has drowned
+/// (painted as water, since the map under it still shows streets), and the
+/// carvings (chalk, like a hill figure).
+struct Paint {
+  drowned: Option<Vec<bool>>,
+  carved: Option<Vec<bool>>,
+}
 
-/// landmass_overlay's image, shared with set_sea_level.
+impl Paint {
+  const DROWNED: ([u8; 3], u8) = ([74, 128, 181], 150); // the preview's water
+  const CHALK: ([u8; 3], u8) = ([250, 250, 245], 200);
+
+  fn of(c: &CachedElevation) -> Self {
+    Paint { drowned: c.drowned().map(<[bool]>::to_vec), carved: c.carved().map(<[bool]>::to_vec) }
+  }
+
+  /// Nearest-sample both masks to the overlay's resolution.
+  fn downsample(&self, width: usize, height: usize, max_dim: usize) -> Paint {
+    let d = |m: &Option<Vec<bool>>| m.as_ref().map(|m| downsample(m, width, height, max_dim).0);
+    Paint { drowned: d(&self.drowned), carved: d(&self.carved) }
+  }
+
+  fn drowned(&self, i: usize) -> bool {
+    self.drowned.as_ref().is_some_and(|d| d[i])
+  }
+
+  fn carved(&self, i: usize) -> bool {
+    self.carved.as_ref().is_some_and(|c| c[i])
+  }
+}
+
+/// landmass_overlay's image, shared with the terrain-changing commands.
 fn render_landmass_overlay(
   labels: &[u32],
-  drowned: Option<&[bool]>,
+  paint: &Paint,
   width: usize,
   height: usize,
   n_landmasses: u32,
@@ -474,17 +565,19 @@ fn render_landmass_overlay(
 
   // nearest-sample downsample, same scheme as elevation preview
   let (labels, w, h) = downsample(labels, width, height, MAX_DIM);
-  let drowned = drowned.map(|d| downsample(d, width, height, MAX_DIM).0);
+  let paint = paint.downsample(width, height, MAX_DIM);
 
   let mut rgba = vec![0u8; w * h * 4];
   for (i, &id) in labels.iter().enumerate() {
     let (rgb, alpha) = if id == 0 {
-      if !drowned.as_ref().is_some_and(|d| d[i]) {
+      if !paint.drowned(i) {
         continue; // water stays transparent
       }
-      DROWNED
+      Paint::DROWNED
     } else if selected.contains(&id) {
       ([255u8, 140, 0], 165u8)
+    } else if paint.carved(i) {
+      Paint::CHALK
     } else if !selected.is_empty() {
       ([130u8, 130, 130], 40u8)
     } else {
@@ -500,12 +593,12 @@ fn render_landmass_overlay(
 }
 
 /// Render the lasso selection as a translucent RGBA PNG (data URL): selected
-/// pixels highlighted, remaining land faded back, water transparent (drowned
-/// land painted as water) — same styling as landmass_overlay with a selection.
+/// pixels highlighted, remaining land faded back, water transparent — same
+/// styling (and the same Paint) as landmass_overlay with a selection.
 #[tauri::command]
 pub async fn lasso_overlay(state: tauri::State<'_, ElevationState>) -> Result<String, String> {
   const MAX_DIM: usize = 1024;
-  let (lasso, land, drowned, width, height) = {
+  let (lasso, land, paint, width, height) = {
     let guard = state.0.lock().unwrap();
     let c = guard.as_ref().ok_or("No terrain loaded — fetch first")?;
     let lasso = c.lasso.clone().ok_or("No lasso selection — draw one first")?;
@@ -517,21 +610,23 @@ pub async fn lasso_overlay(state: tauri::State<'_, ElevationState>) -> Result<St
           .map(|&is_water| !is_water)
           .collect()
       );
-    (lasso, land, c.drowned(), c.width, c.height)
+    (lasso, land, Paint::of(c), c.width, c.height)
   };
 
   let (lasso, w, h) = downsample(&lasso, width, height, MAX_DIM);
   let land = land.map(|l| downsample(&l, width, height, MAX_DIM).0);
-  let drowned = drowned.map(|d| downsample(&d, width, height, MAX_DIM).0);
+  let paint = paint.downsample(width, height, MAX_DIM);
 
   let mut rgba = vec![0u8; w * h * 4];
   for i in 0..w * h {
     let (rgb, alpha): ([u8; 3], u8) = if lasso[i] {
       ([255, 140, 0], 165)
+    } else if paint.carved(i) {
+      Paint::CHALK
     } else if land.as_ref().is_some_and(|l| l[i]) {
       ([130, 130, 130], 40)
-    } else if drowned.as_ref().is_some_and(|d| d[i]) {
-      DROWNED
+    } else if paint.drowned(i) {
+      Paint::DROWNED
     } else {
       continue;
     };

@@ -16,6 +16,7 @@ export default function BottomPanel({ tool, setTool }: Props) {
     heightmap, verticalScale, exportRes, baseMm, smoothFactor,
     selectedLandmasses, setSelectedLandmasses, setLandmassOverlay, setFetchedBounds,
     lassoSelection, setLassoSelection, setSeaLevel, setFetchedStats, setSeaMarks,
+    setCarvings, setCarveSizeM, setCarveReliefM, setCarveNote,
   } = useStore()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -47,6 +48,10 @@ export default function BottomPanel({ tool, setTool }: Props) {
       setLassoSelection(null)
       setSeaLevel(0)
       setFetchedStats({ maxElev: result.maxElev, landKm2: result.landKm2 })
+      setCarvings(0)
+      setCarveSizeM(null)
+      setCarveReliefM(null)
+      setCarveNote(null)
       if (result.landmassCount) {
         setLandmassOverlay(await invoke<string>("landmass_overlay", {}).catch(() => null))
       } else {
@@ -142,6 +147,13 @@ export default function BottomPanel({ tool, setTool }: Props) {
             title="Freehand-select terrain to export — the drawn outline is clipped to land, so it only needs to be rough"
           >
             {tool === "lasso" ? "✕ Cancel" : "◌ Lasso"}
+          </button>
+          <button
+            className={`${styles.drawBtn} ${tool === "carve" ? styles.drawBtnActive : ""}`}
+            onClick={() => setTool(tool === "carve" ? null : "carve")}
+            title="Carve text into the terrain, letters kilometres tall"
+          >
+            {tool === "carve" ? "✕ Done" : "✍ Carve"}
           </button>
         </>
       )}

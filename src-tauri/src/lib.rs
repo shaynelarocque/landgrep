@@ -1,8 +1,10 @@
 use std::sync::Mutex;
 
 mod commands;
+mod edits;
 mod flood;
 mod geotiff;
+mod glyphs;
 mod grid;
 mod landmass;
 mod mesh;
@@ -36,8 +38,8 @@ struct CachedElevation {
   lasso: Option<Vec<bool>>,
   /// The lasso's drawn ring, kept for export-resolution re-rasterization.
   lasso_ring: Option<Vec<[f64; 2]>>,
-  /// Sea-level rise; `data`, `water_mask` and `labels` follow it.
-  sea: flood::Sea,
+  /// Sea level and carvings; `data`, `water_mask` and `labels` follow them.
+  edits: edits::Edits,
 }
 
 pub struct ElevationState(Mutex<Option<CachedElevation>>);
@@ -58,7 +60,9 @@ pub fn run() {
         commands::landmass_overlay,
         commands::lasso_select,
         commands::lasso_overlay,
-        commands::set_sea_level
+        commands::set_sea_level,
+        commands::carve_text,
+        commands::undo_carving
       ]
     )
     .run(tauri::generate_context!())

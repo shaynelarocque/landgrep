@@ -1,13 +1,8 @@
 import { useRef, useState } from "react"
 import { invoke } from "@tauri-apps/api/core"
-import { useStore, PREVIEW_RES, type Heightmap } from "../../data/store"
+import { useStore, PREVIEW_RES, type TerrainUpdate } from "../../data/store"
 import { seaReport } from "../../data/sea"
 import styles from "./Map.module.css"
-
-interface SeaLevelResult {
-  heightmap: Heightmap
-  overlay: string | null
-}
 
 /**
  * Sea-level slider for the terrain preview. The backend rebuilds the
@@ -17,10 +12,7 @@ interface SeaLevelResult {
  * sent next.
  */
 export default function SeaLevel() {
-  const {
-    heightmap, seaLevel, setSeaLevel, fetchedStats, seaMarks,
-    setHeightmap, setLandmassOverlay, setSelectedLandmasses, setLassoSelection,
-  } = useStore()
+  const { heightmap, seaLevel, setSeaLevel, fetchedStats, seaMarks, applyUpdate } = useStore()
   const inFlight = useRef(false)
   const wanted = useRef(seaLevel)
   const [busy, setBusy] = useState(false)
@@ -37,14 +29,12 @@ export default function SeaLevel() {
     try {
       for (;;) {
         const level = wanted.current
-        const result = await invoke<SeaLevelResult>("set_sea_level", {
-          level: level > 0 ? level : null,
-          previewRes: PREVIEW_RES,
-        })
-        setHeightmap(result.heightmap)
-        setLandmassOverlay(result.overlay)
-        setSelectedLandmasses([])
-        setLassoSelection(null)
+        applyUpdate(
+          await invoke<TerrainUpdate>("set_sea_level", {
+            level: level > 0 ? level : null,
+            previewRes: PREVIEW_RES,
+          }),
+        )
         if (wanted.current === level) break
       }
     } catch (e) {
