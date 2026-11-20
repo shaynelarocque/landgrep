@@ -1,5 +1,5 @@
-import { useState } from "react"
-import { MapContainer, TileLayer, useMapEvents } from "react-leaflet"
+import { useEffect, useState } from "react"
+import { MapContainer, TileLayer, useMap, useMapEvents } from "react-leaflet"
 import { Link } from "react-router"
 import "leaflet/dist/leaflet.css"
 import { useStore } from "../../data/store"
@@ -12,6 +12,19 @@ import styles from "./Map.module.css"
 
 /** Active map drawing tool; null = normal pan/click interaction. */
 export type DrawTool = "rect" | "lasso" | null
+
+// One owner for dragging and the cursor: when each tool set them itself,
+// switching straight from one tool to another let the one turning off
+// undo the one turning on (lasso → draw left the map draggable).
+function ToolCursor({ tool }: { tool: DrawTool }) {
+  const map = useMap()
+  useEffect(() => {
+    if (tool) map.dragging.disable()
+    else map.dragging.enable()
+    map.getContainer().style.cursor = tool ? "crosshair" : ""
+  }, [tool, map])
+  return null
+}
 
 // Syncs map position back to the store so Settings can capture it.
 function MapTracker() {
@@ -52,6 +65,7 @@ export default function MapPage() {
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         />
         <MapTracker />
+        <ToolCursor tool={tool} />
         <RectangleDraw drawMode={tool === "rect"} onDrawEnd={() => setTool(null)} />
         <LassoDraw active={tool === "lasso"} onDrawEnd={() => setTool(null)} />
         <LandmassLayer drawMode={tool !== null} />
