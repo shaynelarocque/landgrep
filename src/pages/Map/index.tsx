@@ -35,7 +35,7 @@ export default function MapPage() {
   return (
     <div className={styles.container}>
       <div className={styles.topNav}>
-        <span className={styles.brand}>Settings</span>
+        <span className={styles.brand}>landgrep</span>
         <Link to='/settings' className={styles.settingsLink} title='Settings'>
           ⚙
         </Link>
