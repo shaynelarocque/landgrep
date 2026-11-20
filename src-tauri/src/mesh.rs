@@ -28,7 +28,8 @@ fn write_tri(buf: &mut Vec<u8>, v0: [f32; 3], v1: [f32; 3], v2: [f32; 3]) {
 /// and a mirrored flat bottom at z=0. A grid cell is meshed when all four of
 /// its corner vertices are inside the footprint, so a landmass export
 /// contains that shape alone — not its bounding rectangle. Relief is
-/// measured above the footprint's minimum elevation and sits on a
+/// measured above the footprint's minimum elevation at true scale (the same
+/// mm per metre as the horizontal) times `vertical_scale`, and sits on a
 /// `base_mm`-thick slab. Model axes are +x east, +y north, +z up.
 pub(crate) fn build_stl(
   data: &[f32],
@@ -52,22 +53,19 @@ pub(crate) fn build_stl(
   let cell_y = ((lat_m * mm_per_m) / ((height - 1) as f64)) as f32;
 
   let mut min_elev = f32::INFINITY;
-  let mut max_elev = f32::NEG_INFINITY;
   for (i, &inside) in footprint.iter().enumerate() {
     if inside {
       min_elev = min_elev.min(data[i]);
-      max_elev = max_elev.max(data[i]);
     }
   }
   if !min_elev.is_finite() {
     return Err("Selection contains no terrain".into());
   }
-  let elev_range = max_elev - min_elev;
-  let elev_scale = if elev_range > 0.0 {
-    (((200.0 * mm_per_m) / (elev_range as f64)) as f32) * vertical_scale
-  } else {
-    1.0
-  };
+  // Same mm per metre as the horizontal, then exaggerated: what the 3D
+  // preview draws. (This used to divide by the selection's elevation range
+  // and multiply by 200, which normalized every region's relief to a 200 m
+  // hill: right for Montreal, 16× too flat for Etna.)
+  let elev_scale = (mm_per_m as f32) * vertical_scale;
   let base = base_mm.max(0.4); // degenerate walls below ~one layer height
 
   // Raster rows run north → south, but +y is north in the model, so rows
@@ -246,6 +244,28 @@ mod tests {
     let max_x = vs.iter().map(|v| v[0]).fold(f32::MIN, f32::max);
     let max_y = vs.iter().map(|v| v[1]).fold(f32::MIN, f32::max);
     assert_eq!((peak[0], peak[1]), (max_x, max_y), "the NE peak should sit at +x/+y");
+  }
+
+  #[test]
+  fn relief_is_true_scale_times_exaggeration() {
+    // A 20 m bump and a 1000 m peak must print 50× apart, at the footprint's
+    // own mm per metre. The old formula printed both as tall as a 200 m hill.
+    let (w, h) = (5usize, 5usize);
+    let (s, n, wst, e) = (45.0, 45.1, -73.1, -73.0);
+    let lat_m = (n - s) * 110_540.0;
+    let lon_m = (e - wst) * 111_320.0 * ((s + n) / 2.0f64).to_radians().cos();
+    let mm_per_m = 200.0 / lat_m.max(lon_m);
+    for (relief_m, scale) in [(20.0f32, 1.0f32), (1000.0, 1.0), (1000.0, 2.5)] {
+      let mut data = vec![0.0f32; w * h];
+      data[2 * w + 2] = relief_m;
+      let stl = build_stl(&data, &vec![true; w * h], w, h, scale, 2.0, s, n, wst, e).unwrap();
+      let top = vertices(&stl)
+        .iter()
+        .map(|v| v[2])
+        .fold(f32::MIN, f32::max);
+      let want = (relief_m as f64) * mm_per_m * (scale as f64) + 2.0;
+      assert!(((top as f64) - want).abs() < 1e-3, "{relief_m} m ×{scale}: got {top} mm, want {want:.3}");
+    }
   }
 
   #[test]
