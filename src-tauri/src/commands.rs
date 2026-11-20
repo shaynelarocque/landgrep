@@ -126,7 +126,7 @@ pub async fn fetch_elevation(
             rings_cover_all_water = false;
           }
         }
-        water_level = flatten_water(&mut full_data, &mask);
+        water_level = flatten_water(&mut full_data, &mask, width);
         let (l, n) = label_landmasses(&mask, width, height);
         labels = Some(l);
         n_landmasses = n;
